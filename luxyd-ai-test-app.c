@@ -1,18 +1,13 @@
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "luxyd-ai-ioctl.h"
+
 #define LUXYD_AI_DEVICE		"/dev/luxyd-ai"
-
-/* IOCTL commands */
-#define LUXYD_AI_IOCTL_MAGIC            'L'
-#define LUXYD_AI_LOAD_MODEL             _IOW (LUXYD_AI_IOCTL_MAGIC, 1, unsigned int)
-#define LUXYD_AI_START_INFERENCE        _IOWR(LUXYD_AI_IOCTL_MAGIC, 2, unsigned int)
-#define LUXYD_AI_GET_STATUS             _IOR (LUXYD_AI_IOCTL_MAGIC, 3, unsigned int)
-
 #define BUFSIZE			(16*1024*1024)
 
 int main(void)
@@ -43,38 +38,36 @@ int main(void)
 		goto err;
 	}
 
-	goto err;
-
-	printf("[%s] LUXYD_AI_GET_STATUS test start\n", LUXYD_AI_DEVICE);
-	ret = ioctl(fd, LUXYD_AI_GET_STATUS, &val);
+	printf("[%s] LUXYD_AI_STATUS_GET test start\n", LUXYD_AI_DEVICE);
+	ret = ioctl(fd, LUXYD_AI_STATUS_GET, &val);
 	if (ret) {
-		printf("[%s] LUXYD_AI_GET_STATUS test failed (%d)\n",
+		printf("[%s] LUXYD_AI_STATUS_GET test failed (%d)\n",
 		       LUXYD_AI_DEVICE, ret);
 		goto err;
 	}
 
-	printf("[%s] LUXYD_AI_GET_STATUS test success, received data 0x%08x\n",
+	printf("[%s] LUXYD_AI_STATUS_GET test success, received 0x%08x\n",
 	       LUXYD_AI_DEVICE, val);
 
-	printf("[%s] LUXYD_AI_LOAD_MODEL test start\n", LUXYD_AI_DEVICE);
-	ret = ioctl(fd, LUXYD_AI_LOAD_MODEL, &val);
+	printf("[%s] LUXYD_AI_MODEL_LOAD test start\n", LUXYD_AI_DEVICE);
+	ret = ioctl(fd, LUXYD_AI_MODEL_LOAD, &val);
 	if (ret) {
-		printf("[%s] LUXYD_AI_LOAD_MODEL test failed (%d)\n",
+		printf("[%s] LUXYD_AI_MODEL_LOAD test failed (%d)\n",
 		       LUXYD_AI_DEVICE, ret);
 		goto err;
 	}
 
-	printf("[%s] LUXYD_AI_LOAD_MODEL test success\n", LUXYD_AI_DEVICE);
+	printf("[%s] LUXYD_AI_MODEL_LOAD test success\n", LUXYD_AI_DEVICE);
 
-	printf("[%s] LUXYD_AI_START_INFERENCE test start\n", LUXYD_AI_DEVICE);
-	ret = ioctl(fd, LUXYD_AI_START_INFERENCE, &val);
+	printf("[%s] LUXYD_AI_INFERENCE_START test start\n", LUXYD_AI_DEVICE);
+	ret = ioctl(fd, LUXYD_AI_INFERENCE_START, &val);
 	if (ret) {
-		printf("[%s] LUXYD_AI_START_INFERENCE test failed (%d)\n",
+		printf("[%s] LUXYD_AI_INFERENCE_START test failed (%d)\n",
 		       LUXYD_AI_DEVICE, ret);
 		goto err;
 	}
 
-	printf("[%s] LUXYD_AI_START_INFERENCE test success\n", LUXYD_AI_DEVICE);
+	printf("[%s] LUXYD_AI_INFERENCE_START test success\n", LUXYD_AI_DEVICE);
 
 err:
 	if (buf) {
