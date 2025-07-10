@@ -13,10 +13,12 @@ app: luxyd-ai-test-app.c
 	gcc luxyd-ai-test-app.c -o luxyd-ai-test-app
 
 test:
+	-sudo rmmod vboxvideo
 	-sudo rmmod luxyd_ai
 	sudo dmesg -C
 	sudo insmod luxyd-ai.ko
 	sudo $(PWD)/luxyd-ai-test-app
+	sudo rmmod luxyd_ai
 	sudo dmesg
 
 clean:
