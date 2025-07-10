@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/version.h>
 
 #define DRIVER_NAME	"luxyd-ai"
 #define DRIVER_VERSION	"0.1"
@@ -33,6 +34,11 @@ struct luxyd_ai_device {
 	struct class *dev_class;
 	struct device *dev;
 
+	void __iomem *bar0_virt_addr;
+	void __iomem *bar1_virt_addr;
+	phys_addr_t bar1_phys_addr;
+	unsigned long bar1_len;
+
 	struct mutex ioctl_lock;
 };
 
@@ -42,8 +48,7 @@ static int luxyd_ai_major;
 /* PCI device ID table */
 static const struct pci_device_id luxyd_fpga_id_table[] = {
 	//{ PCI_DEVICE(PCI_ANY_ID, PCI_ANY_ID) },
-	{ PCI_DEVICE(0x8086, 0x1237) },		/* Testing */
-	{ PCI_DEVICE(0x8086, 0xa121) },		/* Testing */
+	{ PCI_DEVICE(0x80ee, 0xbeef) },		/* VirtualBox Graphics Adapter */
 	{ PCI_DEVICE(0x10ee, 0x7021) },		/* Xilinx Kintex-7 */
 	{ 0, },
 };
@@ -102,11 +107,52 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	return ret;
 }
 
+static int luxyd_ai_mmap(struct file *filp, struct vm_area_struct *vma)
+{
+	struct luxyd_ai_device *drvdata = filp->private_data;
+	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long pfn;
+
+	/* Check */
+	if (!drvdata->bar1_virt_addr || !drvdata->bar1_phys_addr) {
+		pr_err("%s: BAR1 not mapped or unknown physical address\n",
+		       DRIVER_NAME);
+		return -EFAULT;
+	}
+
+	if (offset + size > drvdata->bar1_len) {
+		pr_err("%s: mmap request out of bound\n", DRIVER_NAME);
+		return -EINVAL;
+	}
+
+	/* Get page frame number */
+	pfn = (drvdata->bar1_phys_addr + offset) >> PAGE_SHIFT;
+
+	/* Remap physical address to the userspace */
+	if (remap_pfn_range(vma,
+			    vma->vm_start,
+			    pfn,
+			    size,
+			    vma->vm_page_prot)) {
+		pr_err("%s: remap_pfn_range() failed\n", DRIVER_NAME);
+		return -EAGAIN;
+	}
+
+	pr_info("%s: BAR1 (phys 0x%llx, len 0x%lx) mapped to userspace at "
+		"0x%lx, len 0x%lx bytes\n",
+		DRIVER_NAME, drvdata->bar1_phys_addr, drvdata->bar1_len,
+		vma->vm_start, size);
+
+	return 0;
+}
+
 static const struct file_operations luxyd_ai_fops = {
 	.owner          = THIS_MODULE,
 	.open           = luxyd_ai_open,
 	.release        = luxyd_ai_release,
 	.unlocked_ioctl = luxyd_ai_unlocked_ioctl,
+	.mmap		= luxyd_ai_mmap,
 };
 
 static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id)
@@ -126,6 +172,62 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 	drvdata->pdev = pdev;
 	pci_set_drvdata(pdev, drvdata);
 
+	/* Enable PCI device */
+	ret = pcim_enable_device(pdev);
+	if (ret) {
+		pr_err("%s: pcim_enable_device() failed. Aborting.\n",
+		       DRIVER_NAME);
+
+		return ret;
+	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+	/* Request and map BAR0 - status/control register */
+	drvdata->bar0_virt_addr = pcim_iomap_region(pdev, 0, "fpga_pci_bar0");
+	if (IS_ERR(drvdata->bar0_virt_addr)) {
+		pr_err("%s: pcim_iomap_region() BAR0 failed. Aborting.\n",
+		       DRIVER_NAME);
+		return PTR_ERR(drvdata->bar0_virt_addr);
+	}
+	pr_info("%s: BAR0 mapped to %p, length 0x%1x.\n", DRIVER_NAME,
+		drvdata->bar0_virt_addr, pci_resource_len(pdev, 0));
+
+	/* Request and map BAR1 - on-board memory */
+	drvdata->bar1_virt_addr = pcim_iomap_region(pdev, 1, "fpga_pci_bar1");
+	if (IS_ERR(drvdata->bar1_virt_addr)) {
+		pr_err("%s: pcim_iomap_region() BAR1 failed. Aborting.\n",
+		       DRIVER_NAME);
+		return PTR_ERR(drvdata->bar1_virt_addr);
+	}
+
+	drvdata->bar1_phys_addr = pci_resource_start(pdev, 1);
+	drvdata->bar1_len = pci_resource_len(pdev, 1);
+	pr_info("%s: BAR1 memory mapped to %p, phys 0x%llx, length 0x%lx\n",
+		DRIVER_NAME, drvdata->bar1_virt_addr, drvdata->bar1_phys_addr,
+		drvdata->bar1_len);
+#else
+	/*
+	 * FIXME: Real scenario as follows,
+	 * BAR0 for status/control register, and
+	 * BAR1 for memory
+	 *
+	 * During testing with VM, only BAR0 available, for memory.
+	 */
+	ret = pcim_iomap_regions(pdev, BIT(0), DRIVER_NAME);
+	if (ret) {
+		pr_err("%s: pcim_iomap_regions() failed. Aborting. \n",
+		       DRIVER_NAME);
+		return -ENOMEM;
+	}
+
+	drvdata->bar1_virt_addr = pcim_iomap_table(pdev)[0];
+	drvdata->bar1_phys_addr = pci_resource_start(pdev, 0);
+	drvdata->bar1_len = pci_resource_len(pdev, 0);
+	pr_info("%s: BAR1 memory mapped to 0x%p, phys 0x%llx, length 0x%lx\n",
+		DRIVER_NAME, drvdata->bar1_virt_addr, drvdata->bar1_phys_addr,
+		drvdata->bar1_len);
+#endif
+
 	/* Request the device number */
 	ret = alloc_chrdev_region(&luxyd_ai_major, 0, 1, DRIVER_NAME);
 	if (ret) {
@@ -142,7 +244,6 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 		goto out_dealloc_region;
 	}
 
-	//luxyd_ai_class = class_create(THIS_MODULE, DRIVER_NAME);
 	luxyd_ai_class = class_create(DRIVER_NAME);
 	if (IS_ERR(luxyd_ai_class)) {
 		dev_err(dev, "failed to allocate class\n");
