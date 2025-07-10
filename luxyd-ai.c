@@ -9,6 +9,8 @@
 #include <linux/pci.h>
 #include <linux/version.h>
 
+#include "luxyd-ai-ioctl.h"
+
 #define DRIVER_NAME	"luxyd-ai"
 #define DRIVER_VERSION	"0.1"
 
@@ -20,12 +22,6 @@ MODULE_VERSION(DRIVER_VERSION);
 /* Hardware information */
 #define VENDOR_ID			0x10ee	/* Xilinx Vendor ID */
 #define DEVICE_ID			0x7021	/* Kintex-7 Device ID */
-
-/* IOCTL commands */
-#define LUXYD_AI_IOCTL_MAGIC		'L'
-#define LUXYD_AI_LOAD_MODEL		_IOW (LUXYD_AI_IOCTL_MAGIC, 1, u32)
-#define LUXYD_AI_START_INFERENCE	_IOWR(LUXYD_AI_IOCTL_MAGIC, 2, u32)
-#define LUXYD_AI_GET_STATUS		_IOR (LUXYD_AI_IOCTL_MAGIC, 3, u32)
 
 /* Private data structure */
 struct luxyd_ai_device {
@@ -83,21 +79,21 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		return -ERESTARTSYS;
 
 	switch (cmd) {
-	case LUXYD_AI_LOAD_MODEL:
-		pr_info("%s: ioctl cmd: LUXYD_AI_LOAD_MODEL\n", DRIVER_NAME);
+	case LUXYD_AI_STATUS_GET:
+		pr_info("%s: ioctl cmd LUXYD_AI_STATUS_GET\n", DRIVER_NAME);
 		break;
 
-	case LUXYD_AI_START_INFERENCE:
-		pr_info("%s: ioctl cmd: LUXYD_AI_START_INFERENCE\n",
+	case LUXYD_AI_MODEL_LOAD:
+		pr_info("%s: ioctl cmd LUXYD_AI_MODEL_LOAD\n", DRIVER_NAME);
+		break;
+
+	case LUXYD_AI_INFERENCE_START:
+		pr_info("%s: ioctl cmd LUXYD_AI_INFERENCE_START\n",
 			DRIVER_NAME);
 		break;
 
-	case LUXYD_AI_GET_STATUS:
-		pr_info("%s: ioctl cmd: LUXYD_AI_GET_STATUS\n", DRIVER_NAME);
-		break;
-
 	default:
-		pr_info("%s: ioctl cmd: not supported\n", DRIVER_NAME);
+		pr_info("%s: ioctl cmd not supported (%d)\n", DRIVER_NAME, cmd);
 		ret = -ENOTTY;
 		break;
 	}
