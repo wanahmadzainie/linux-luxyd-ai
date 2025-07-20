@@ -23,6 +23,22 @@ MODULE_VERSION(DRIVER_VERSION);
 #define VENDOR_ID			0x10ee	/* Xilinx Vendor ID */
 #define DEVICE_ID			0x7021	/* Kintex-7 Device ID */
 
+/* TODO: Status Control Register */
+#define LUXYD_AI_CMD_OFFSET		0x0
+#define LUXYD_AI_CMD_START		BIT(8)
+
+#define LUXYD_AI_INFO_OFFSET		0x4
+#define LUXYD_AI_MATA_ROWCOUNT		GENMASK(7, 0)
+#define LUXYD_AI_MATA_COLCOUNT		GENMASK(15, 8)
+#define LUXYD_AI_MATB_ROWCOUNT		GENMASK(23, 16)
+#define LUXYD_AI_MATB_COLCOUNT		GENMASK(31, 24)
+
+#define LUXYD_AI_STATUS_OFFSET		0x8
+#define LUXYD_AI_STATUS_READY		BIT(8)
+
+#define CMD_SIGNATURE			(0xac)
+#define STATUS_SIGNATURE		(0xfc)
+
 /* Private data structure */
 struct luxyd_ai_device {
 	struct pci_dev *pdev;
@@ -74,6 +90,11 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 {
 	struct luxyd_ai_device *drvdata = filp->private_data;
 	int ret = 0;
+	static struct matrix_size matrix_size;
+	u16 *a_matrix, *b_matrix;
+	u32 *p_matrix, sum;
+	int i, j, k;
+	u32 val;
 
 	if (mutex_lock_interruptible(&drvdata->ioctl_lock))
 		return -ERESTARTSYS;
@@ -81,6 +102,11 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	switch (cmd) {
 	case LUXYD_AI_STATUS_GET:
 		pr_info("%s: ioctl cmd LUXYD_AI_STATUS_GET\n", DRIVER_NAME);
+		val = readl(drvdata->bar0_virt_addr + LUXYD_AI_STATUS_OFFSET);
+
+		if (copy_to_user((void __user *)arg, &val, sizeof(val)))
+			return -EFAULT;
+
 		break;
 
 	case LUXYD_AI_MODEL_LOAD:
@@ -90,6 +116,55 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	case LUXYD_AI_INFERENCE_START:
 		pr_info("%s: ioctl cmd LUXYD_AI_INFERENCE_START\n",
 			DRIVER_NAME);
+		break;
+
+	case LUXYD_AI_MATRIX_LOAD:
+		pr_info("%s: ioctl cmd LUXYD_AI_MATRIX_LOAD\n", DRIVER_NAME);
+
+		if (copy_from_user(&matrix_size,
+				   (struct matrix_size __user *)arg,
+				   sizeof(struct matrix_size))) {
+			ret = -EFAULT;
+			break;
+		}
+
+		if (matrix_size.m <= 0 ||
+		    matrix_size.n <= 0 ||
+		    matrix_size.p <= 0) {
+			ret = -EINVAL;
+			break;
+		}
+
+		break;
+
+	case LUXYD_AI_MATRIX_MULTIPLY:
+		pr_info("%s: ioctl cmd LUXYD_AI_MATRIX_MULTIPLY\n",
+			DRIVER_NAME);
+
+		if (!drvdata->bar1_virt_addr) {
+			pr_err("%s: BAR1 unknown physical address\n",
+			       DRIVER_NAME);
+			ret = -EIO;
+			break;
+		}
+
+		a_matrix = (u16 *)(drvdata->bar1_virt_addr + MATRIXA_OFFSET);
+		b_matrix = (u16 *)(drvdata->bar1_virt_addr + MATRIXB_OFFSET);
+		p_matrix = (u32 *)(drvdata->bar1_virt_addr + MATRIXP_OFFSET);
+
+		/* Matrix multiplication */
+		for (i = 0; i < matrix_size.m; i++) {
+			for (j = 0; j < matrix_size.p; j++) {
+				sum = 0;
+				for (k = 0; k < matrix_size.n; k++) {
+					sum += a_matrix[i * matrix_size.n + k] *
+						b_matrix[k * matrix_size.p + j];
+				}
+				p_matrix[i * matrix_size.p + j] = sum;
+			}
+		}
+
+		pr_info("%s: Matrix P ready\n", DRIVER_NAME);
 		break;
 
 	default:
