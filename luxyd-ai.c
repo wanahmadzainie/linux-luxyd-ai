@@ -21,7 +21,7 @@ MODULE_VERSION(DRIVER_VERSION);
 
 /* Hardware information */
 #define VENDOR_ID			0x10ee	/* Xilinx Vendor ID */
-#define DEVICE_ID			0x7021	/* Kintex-7 Device ID */
+#define DEVICE_ID			0x7011	/* Kintex-7 Device ID */
 
 /* TODO: Status Control Register */
 #define LUXYD_AI_CMD_OFFSET		0x0
@@ -61,7 +61,7 @@ static int luxyd_ai_major;
 static const struct pci_device_id luxyd_fpga_id_table[] = {
 	//{ PCI_DEVICE(PCI_ANY_ID, PCI_ANY_ID) },
 	{ PCI_DEVICE(0x80ee, 0xbeef) },		/* VirtualBox Graphics Adapter */
-	{ PCI_DEVICE(0x10ee, 0x7021) },		/* Xilinx Kintex-7 */
+	{ PCI_DEVICE(0x10ee, 0x7011) },		/* Xilinx Kintex-7 */
 	{ 0, },
 };
 MODULE_DEVICE_TABLE(pci, luxyd_fpga_id_table);
