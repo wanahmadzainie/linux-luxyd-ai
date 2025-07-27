@@ -24,20 +24,83 @@ MODULE_VERSION(DRIVER_VERSION);
 #define DEVICE_ID			0x7011	/* Kintex-7 Device ID */
 
 /* TODO: Status Control Register */
-#define LUXYD_AI_CMD_OFFSET		0x0
+#define LUXYD_AI_CMD_OFFSET		0xc0000
 #define LUXYD_AI_CMD_START		BIT(8)
 
-#define LUXYD_AI_INFO_OFFSET		0x4
+#define LUXYD_AI_INFO_OFFSET		0xc0004
 #define LUXYD_AI_MATA_ROWCOUNT		GENMASK(7, 0)
 #define LUXYD_AI_MATA_COLCOUNT		GENMASK(15, 8)
 #define LUXYD_AI_MATB_ROWCOUNT		GENMASK(23, 16)
 #define LUXYD_AI_MATB_COLCOUNT		GENMASK(31, 24)
 
-#define LUXYD_AI_STATUS_OFFSET		0x8
+#define LUXYD_AI_STATUS_OFFSET		0xc0008
 #define LUXYD_AI_STATUS_READY		BIT(8)
 
 #define CMD_SIGNATURE			(0xac)
 #define STATUS_SIGNATURE		(0xfc)
+
+#define DMA_ENGINE_ID_OFFSET		0x0
+
+#define DMA_BUFFER_SIZE			(16 * 1024)
+
+/* Borrowed from drivers/dma/xilinx/xdma-regs.h */
+/* descriptor definitions */
+#define XDMA_DESC_ADJACENT		32
+#define XDMA_DESC_ADJACENT_MASK		(XDMA_DESC_ADJACENT - 1)
+#define XDMA_DESC_ADJACENT_BITS		GENMASK(13, 8)
+#define XDMA_DESC_MAGIC			0xad4bUL
+#define XDMA_DESC_MAGIC_BITS		GENMASK(31, 16)
+#define XDMA_DESC_FLAGS_BITS		GENMASK(7, 0)
+#define XDMA_DESC_STOPPED		BIT(0)
+#define XDMA_DESC_COMPLETED		BIT(1)
+#define XDMA_DESC_BLEN_BITS		28
+#define XDMA_DESC_BLEN_MAX		(BIT(XDMA_DESC_BLEN_BITS) - PAGE_SIZE)
+
+/* macros to construct the descriptor control word */
+#define XDMA_DESC_CONTROL(adjacent, flag)				\
+	(FIELD_PREP(XDMA_DESC_MAGIC_BITS, XDMA_DESC_MAGIC) |		\
+	 FIELD_PREP(XDMA_DESC_ADJACENT_BITS, (adjacent) - 1) |		\
+	 FIELD_PREP(XDMA_DESC_FLAGS_BITS, (flag)))
+
+/* Channel registers */
+#define XDMA_CHAN_IDENTIFIER		0x0
+#define XDMA_CHAN_CONTROL		0x4
+#define XDMA_CHAN_CONTROL_W1S		0x8
+#define XDMA_CHAN_CONTROL_W1C		0xc
+#define XDMA_CHAN_STATUS		0x40
+#define XDMA_CHAN_STATUS_RC		0x44
+#define XDMA_CHAN_COMPLETED_DESC	0x48
+#define XDMA_CHAN_ALIGNMENTS		0x4c
+#define XDMA_CHAN_INTR_ENABLE		0x90
+#define XDMA_CHAN_INTR_ENABLE_W1S	0x94
+#define XDMA_CHAN_INTR_ENABLE_W1C	0x9c
+
+#define XDMA_CHAN_STRIDE	0x100
+#define XDMA_CHAN_H2C_OFFSET	0x0
+#define XDMA_CHAN_C2H_OFFSET	0x1000
+#define XDMA_CHAN_H2C_TARGET	0x0
+#define XDMA_CHAN_C2H_TARGET	0x1
+
+/* Channel SGDMA registers */
+#define XDMA_SGDMA_IDENTIFIER	0x4000
+#define XDMA_SGDMA_DESC_LO	0x4080
+#define XDMA_SGDMA_DESC_HI	0x4084
+#define XDMA_SGDMA_DESC_ADJ	0x4088
+#define XDMA_SGDMA_DESC_CREDIT	0x408c
+
+/* XDMA descriptor */
+struct xdma_desc {
+	__le32	control;
+	__le32	bytes;		/* transfer length in bytes */
+	__le64	src_addr;	/* source address */
+	__le64	dst_addr;	/* destination address */
+	__le64	next_desc;	/* next desc address */
+};
+
+#define XDMA_DESC_SIZE			sizeof(struct xdma_desc)
+#define XDMA_DESC_BLOCK_SIZE		(XDMA_DESC_SIZE * XDMA_DESC_ADJACENT)
+#define XDMA_DESC_BLOCK_ALIGN		32
+#define XDMA_DESC_BLOCK_BOUNDARY	4096
 
 /* Private data structure */
 struct luxyd_ai_device {
@@ -50,6 +113,11 @@ struct luxyd_ai_device {
 	void __iomem *bar1_virt_addr;
 	phys_addr_t bar1_phys_addr;
 	unsigned long bar1_len;
+
+	struct dma_pool *desc_pool;
+	void *dma_buffer_virt;
+	dma_addr_t dma_buffer_phys;
+	size_t dma_buffer_size;
 
 	struct mutex ioctl_lock;
 };
@@ -89,6 +157,8 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 				    unsigned long arg)
 {
 	struct luxyd_ai_device *drvdata = filp->private_data;
+	struct xdma_desc *mata_desc;
+	size_t bytes_to_transfer;
 	int ret = 0;
 	static struct matrix_size matrix_size;
 	u16 *a_matrix, *b_matrix;
@@ -96,16 +166,28 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	int i, j, k;
 	u32 val;
 
+#if 0
 	if (mutex_lock_interruptible(&drvdata->ioctl_lock))
 		return -ERESTARTSYS;
+#endif
 
 	switch (cmd) {
 	case LUXYD_AI_STATUS_GET:
 		pr_info("%s: ioctl cmd LUXYD_AI_STATUS_GET\n", DRIVER_NAME);
-		val = readl(drvdata->bar0_virt_addr + LUXYD_AI_STATUS_OFFSET);
+		val = ioread32(drvdata->bar0_virt_addr + LUXYD_AI_STATUS_OFFSET);
 
 		if (copy_to_user((void __user *)arg, &val, sizeof(val)))
 			return -EFAULT;
+
+		val = ioread32(drvdata->bar1_virt_addr + 0x0000);
+                pr_info("%s: DMA engine ID Read at offset 0x0000 val=0x%08x\n",
+			DRIVER_NAME, val);
+		val = ioread32(drvdata->bar1_virt_addr + 0x2000);
+                pr_info("%s: DMA engine ID Read at offset 0x2000 val=0x%08x\n",
+                        DRIVER_NAME, val);
+		val = ioread32(drvdata->bar1_virt_addr + 0x4000);
+                pr_info("%s: DMA engine ID Read at offset 0x4000 val=0x%08x\n",
+                        DRIVER_NAME, val);
 
 		break;
 
@@ -134,6 +216,64 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 			ret = -EINVAL;
 			break;
 		}
+
+		val = FIELD_PREP(LUXYD_AI_MATA_ROWCOUNT, matrix_size.m) |
+			FIELD_PREP(LUXYD_AI_MATA_COLCOUNT, matrix_size.n) |
+			FIELD_PREP(LUXYD_AI_MATB_ROWCOUNT, matrix_size.n) |
+			FIELD_PREP(LUXYD_AI_MATB_COLCOUNT, matrix_size.p);
+		iowrite32(val, drvdata->bar0_virt_addr + LUXYD_AI_INFO_OFFSET);
+
+		val = ioread32(drvdata->bar0_virt_addr + LUXYD_AI_INFO_OFFSET);
+		pr_info("%s: readback val=0x%08x\n", DRIVER_NAME, val);
+
+		/* Transfer matrix data */
+		val = 0xdeadbeef;
+		bytes_to_transfer = sizeof(val);
+		pr_info("%s: bytes_to_transfer=%lu\n",
+			DRIVER_NAME, bytes_to_transfer);
+		memcpy(drvdata->dma_buffer_virt, &val, bytes_to_transfer);
+
+		/* Fill up the descriptor */
+		mata_desc = drvdata->dma_buffer_virt;
+		mata_desc->control = XDMA_DESC_CONTROL(1, 0x13); // 0xad4b0013
+		mata_desc->bytes = cpu_to_le32(bytes_to_transfer);
+		mata_desc->src_addr = cpu_to_le64(0);
+		mata_desc->dst_addr = cpu_to_le64(0);
+		mata_desc->next_desc = cpu_to_le64(0);
+
+		/* Step 1: Read DMA Engine ID */
+		val = ioread32(drvdata->bar1_virt_addr + XDMA_CHAN_IDENTIFIER);
+		pr_info("%s: Step 1 DMA Engine ID val=0x%08x\n",
+			DRIVER_NAME, val);
+
+		/* Step 2: Write DMA config register for the descriptor */
+		val = lower_32_bits(drvdata->dma_buffer_phys);
+		pr_info("%s: Step 2 write DMA config for the descriptor\n",
+			DRIVER_NAME);
+		iowrite32(val, drvdata->bar1_virt_addr + XDMA_SGDMA_DESC_LO);
+
+		/* Step 3: Write DMA config register to start H2C */
+		pr_info("%s: Step 3 write DMA config to start H2C\n",
+			DRIVER_NAME);
+		iowrite32(0x00fffe7f,
+			  drvdata->bar1_virt_addr + XDMA_CHAN_CONTROL);
+
+		/* Step 4: Read H2C status */
+		val = ioread32(drvdata->bar1_virt_addr + XDMA_CHAN_STATUS);
+		pr_info("%s: Step 4 H2C status=0x%08x\n", DRIVER_NAME, val);
+
+		/* Step 5: Read H2C descriptor count */
+		val = ioread32(drvdata->bar1_virt_addr + XDMA_CHAN_COMPLETED_DESC);
+		pr_info("%s: Step 5 H2C descriptor count val=0x%08x\n",
+			DRIVER_NAME, val);
+
+		/* Step 6: Read H2C status */
+		val = ioread32(drvdata->bar1_virt_addr + XDMA_CHAN_STATUS);
+		pr_info("%s: Step 6 H2C status=0x%08x\n", DRIVER_NAME, val);
+
+		//val = 0;
+		//memcpy(&val, drvdata->dma_buffer_virt, bytes_to_transfer);
+		//pr_info("%s: readback=0x%08x\n", DRIVER_NAME, val);
 
 		break;
 
@@ -173,7 +313,9 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		break;
 	}
 
+#if 0
 	mutex_unlock(&drvdata->ioctl_lock);
+#endif
 
 	return ret;
 }
@@ -230,6 +372,7 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 {
 	struct device *dev = &pdev->dev;
 	struct luxyd_ai_device *drvdata;
+	unsigned long bar1_flags;
 	int ret;
 
 	pr_info("%s: probing device 0x%04x:0x%04x\n", DRIVER_NAME,
@@ -260,7 +403,7 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 		       DRIVER_NAME);
 		return PTR_ERR(drvdata->bar0_virt_addr);
 	}
-	pr_info("%s: BAR0 mapped to %p, length 0x%1x.\n", DRIVER_NAME,
+	pr_info("%s: BAR0 mapped to %p, length 0x%llx\n", DRIVER_NAME,
 		drvdata->bar0_virt_addr, pci_resource_len(pdev, 0));
 
 	/* Request and map BAR1 - on-board memory */
@@ -298,6 +441,58 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 		DRIVER_NAME, drvdata->bar1_virt_addr, drvdata->bar1_phys_addr,
 		drvdata->bar1_len);
 #endif
+
+	bar1_flags = pci_resource_flags(pdev, 1);
+	if (!(bar1_flags & IORESOURCE_MEM)) {
+		pr_warn("%s: BAR1 is not a memory region.\n", DRIVER_NAME);
+		drvdata->bar1_virt_addr = NULL;
+	} else if (bar1_flags & IORESOURCE_PREFETCH) {
+		pr_warn("%s: BAR1 is prefetchable memory.\n", DRIVER_NAME);
+	} else {
+		pr_info("%s: BAR1 is non-prefetchable memory.\n", DRIVER_NAME);
+	}
+
+	/* Enable DMA */
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret)
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(34));
+	if (ret) {
+		pr_err("%s: No suitable DMA support available.\n", DRIVER_NAME);
+		//pci_release_regions(pdev);
+		return ret;
+	}
+	pr_info("%s: DMA mask set.\n", DRIVER_NAME);
+
+	/* Create DMA pool for a fixed-size allocation */
+	drvdata->desc_pool = dma_pool_create("desc_poo", dev,
+					     XDMA_DESC_BLOCK_SIZE,
+					     XDMA_DESC_BLOCK_ALIGN,
+					     XDMA_DESC_BLOCK_BOUNDARY);
+	if (!drvdata->desc_pool) {
+		pr_err("%s: unable to allocate descriptor pool\n", DRIVER_NAME);
+		return -ENOMEM;
+	}
+	pr_info("%s: DMA pool created for buffer size %zu\n",
+		DRIVER_NAME, XDMA_DESC_BLOCK_SIZE);
+
+	/* Allocate a buffer from the DMA pool */
+	drvdata->dma_buffer_size = XDMA_DESC_BLOCK_SIZE;
+	drvdata->dma_buffer_virt = dma_pool_alloc(drvdata->desc_pool,
+						  GFP_KERNEL,
+						  &drvdata->dma_buffer_phys);
+	if (!drvdata->dma_buffer_virt) {
+		pr_err("%s: Failed to allocated DMA coherent buffer from pool of size %zu.\n",
+		       DRIVER_NAME, drvdata->dma_buffer_size);
+		dma_pool_destroy(drvdata->desc_pool);
+		return -ENOMEM;
+	}
+	pr_info("%s: DMA pool buffer allocated: virt=%p, phys=0x%llx, size=%zu\n",
+		DRIVER_NAME, drvdata->dma_buffer_virt,
+		(unsigned long long)drvdata->dma_buffer_phys,
+		drvdata->dma_buffer_size);
+
+	/* Initialize DMA buffer */
+	memset(drvdata->dma_buffer_virt, 0, drvdata->dma_buffer_size);
 
 	/* Request the device number */
 	ret = alloc_chrdev_region(&luxyd_ai_major, 0, 1, DRIVER_NAME);
@@ -368,6 +563,13 @@ static void luxyd_fpga_remove(struct pci_dev *pdev)
 
 	/* Unregister device number */
 	unregister_chrdev_region(luxyd_ai_major, 1);
+
+	/* Free DMA buffer */
+	if (drvdata->dma_buffer_virt) {
+		dma_free_coherent(&pdev->dev, drvdata->dma_buffer_size,
+				  drvdata->dma_buffer_virt,
+				  drvdata->dma_buffer_phys);
+	}
 }
 
 /* PCI driver structure */
