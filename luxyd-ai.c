@@ -4,6 +4,7 @@
  */
 
 #include <linux/cdev.h>
+#include <linux/delay.h>
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -115,6 +116,10 @@ struct luxyd_ai_device {
 	unsigned long bar1_len;
 
 	struct dma_pool *desc_pool;
+	void *dma_desc_virt;
+	dma_addr_t dma_desc_phys;
+	size_t dma_desc_size;
+
 	void *dma_buffer_virt;
 	dma_addr_t dma_buffer_phys;
 	size_t dma_buffer_size;
@@ -159,12 +164,15 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	struct luxyd_ai_device *drvdata = filp->private_data;
 	struct xdma_desc *mata_desc;
 	size_t bytes_to_transfer;
+	int timeout;
 	int ret = 0;
 	static struct matrix_size matrix_size;
 	u16 *a_matrix, *b_matrix;
 	u32 *p_matrix, sum;
 	int i, j, k;
-	u32 buffer;
+	dma_addr_t dma_addr;
+	char *kbuf;
+	u32 buf;
 	u32 val;
 
 #if 0
@@ -228,37 +236,43 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		pr_info("%s: readback val=0x%08x\n", DRIVER_NAME, val);
 
 		/* Transfer matrix data */
-		buffer = 0xdeadbeef;
-		bytes_to_transfer = sizeof(val);
+		buf = 0xdeadbeef;
+		bytes_to_transfer = sizeof(buf);
+		kbuf = dma_alloc_coherent(&drvdata->pdev->dev,
+					  bytes_to_transfer, &dma_addr,
+					  GFP_KERNEL);
+		memcpy(kbuf, &buf, bytes_to_transfer);
 
 		/* Fill up the descriptor */
-		mata_desc = drvdata->dma_buffer_virt;
+		mata_desc = drvdata->dma_desc_virt;
 		mata_desc->control = XDMA_DESC_CONTROL(1, 0x13); // 0xad4b0013
 		mata_desc->bytes = cpu_to_le32(bytes_to_transfer);
-		mata_desc->src_addr = cpu_to_le64(&buffer);
+		mata_desc->src_addr = cpu_to_le64(dma_addr);
 		mata_desc->dst_addr = cpu_to_le64(0);
 		mata_desc->next_desc = cpu_to_le64(0);
 
-		pr_info("%s: mata_desc->control=0x%08x\n", DRIVER_NAME, mata_desc->control);
-		pr_info("%s: mata_desc->bytes=0x%08x\n", DRIVER_NAME, mata_desc->bytes);
-		pr_info("%s: mata_desc->src_addr=0x%08llx\n", DRIVER_NAME, mata_desc->src_addr);
-		pr_info("%s: mata_desc->dst_addr=0x%08llx\n", DRIVER_NAME, mata_desc->dst_addr);
-		pr_info("%s: mata_desc->next_desc=0x%08llx\n", DRIVER_NAME, mata_desc->next_desc);
+		//pr_info("%s: mata_desc->control=0x%08x\n", DRIVER_NAME, mata_desc->control);
+		//pr_info("%s: mata_desc->bytes=0x%08x\n", DRIVER_NAME, mata_desc->bytes);
+		//pr_info("%s: mata_desc->src_addr=0x%08llx\n", DRIVER_NAME, mata_desc->src_addr);
+		//pr_info("%s: mata_desc->dst_addr=0x%08llx\n", DRIVER_NAME, mata_desc->dst_addr);
+		//pr_info("%s: mata_desc->next_desc=0x%08llx\n", DRIVER_NAME, mata_desc->next_desc);
 
 		/* Step 1: Read DMA Engine ID */
 		val = ioread32(drvdata->bar1_virt_addr);
 		pr_info("%s: Step 1 DMA Engine ID val=0x%08x\n",
 			DRIVER_NAME, val);
-		val = ioread32(drvdata->bar1_virt_addr + 0x0040);
-		pr_info("%s: Step X H2C status=0x%08x\n", DRIVER_NAME, val);
 
 		/* Step 2: Write DMA config register for the descriptor */
 		pr_info("%s: Step 2 write DMA config for the descriptor\n",
 			DRIVER_NAME);
-		val = lower_32_bits(drvdata->dma_buffer_phys);
+		val = lower_32_bits(drvdata->dma_desc_phys);
 		iowrite32(val, drvdata->bar1_virt_addr + 0x4080);
-		val = upper_32_bits(drvdata->dma_buffer_phys);
+		val = upper_32_bits(drvdata->dma_desc_phys);
 		iowrite32(val, drvdata->bar1_virt_addr + 0x4084);
+		val = ioread32(drvdata->bar1_virt_addr + 0x4080);
+		pr_info("%s: readback offset 0x4080=0x%08x\n", DRIVER_NAME, val);
+		val = ioread32(drvdata->bar1_virt_addr + 0x4084);
+		pr_info("%s: readback offset 0x4084=0x%08x\n", DRIVER_NAME, val);
 
 		/* Step 3: Write DMA config register to start H2C */
 		pr_info("%s: Step 3 write DMA config to start H2C\n",
@@ -266,8 +280,13 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		iowrite32(0x00fffe7f, drvdata->bar1_virt_addr + 0x0004);
 
 		/* Step 4: Read H2C status */
-		val = ioread32(drvdata->bar1_virt_addr + 0x0040);
-		pr_info("%s: Step 4 H2C status=0x%08x\n", DRIVER_NAME, val);
+		for (timeout = 0; timeout < 10; timeout++) {
+			val = ioread32(drvdata->bar1_virt_addr + 0x0040);
+			pr_info("%s: Step 4 H2C status=0x%08x\n", DRIVER_NAME, val);
+			if ((val & BIT(0)) == 0x0)
+				break;
+			udelay(10);
+		}
 
 		/* Step 5: Read H2C descriptor count */
 		val = ioread32(drvdata->bar1_virt_addr + 0x0048);
@@ -277,31 +296,37 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		/* Step 6: Read H2C status */
 		val = ioread32(drvdata->bar1_virt_addr + 0x0040);
 		pr_info("%s: Step 6 H2C status=0x%08x\n", DRIVER_NAME, val);
-		break;
 
-		buffer = 0;
+		buf = 0;
 
 		/* Fill up the descriptor */
 		mata_desc->control = XDMA_DESC_CONTROL(1, 0x13); // 0xad4b0013
 		mata_desc->bytes = cpu_to_le32(bytes_to_transfer);
 		mata_desc->src_addr = cpu_to_le64(0);
-		mata_desc->dst_addr = cpu_to_le64(&buffer);
+		mata_desc->dst_addr = cpu_to_le64(dma_addr);
 		mata_desc->next_desc = cpu_to_le64(0);
 
 		/* Step 1: Write DMA config register for the descriptor */
-		val = lower_32_bits(drvdata->dma_buffer_phys);
+		val = lower_32_bits(drvdata->dma_desc_phys);
 		pr_info("%s: Step 1 write DMA config for the descriptor\n",
 			DRIVER_NAME);
 		iowrite32(val, drvdata->bar1_virt_addr + 0x5080);
+		val = upper_32_bits(drvdata->dma_desc_phys);
+		iowrite32(val, drvdata->bar1_virt_addr + 0x5084);
 
 		/* Step 2: Write DMA config register to start H2C */
 		pr_info("%s: Step 2 write DMA config to start C2H\n",
 			DRIVER_NAME);
-		//iowrite32(0x00fffe7f, drvdata->bar1_virt_addr + 0x1004);
+		iowrite32(0x00fffe7f, drvdata->bar1_virt_addr + 0x1004);
 
 		/* Step 3: Read C2H status */
-                val = ioread32(drvdata->bar1_virt_addr + 0x1040);
-                pr_info("%s: Step 3 C2H status=0x%08x\n", DRIVER_NAME, val);
+		for (timeout = 0; timeout < 10; timeout++) {
+			val = ioread32(drvdata->bar1_virt_addr + 0x1040);
+			pr_info("%s: Step 3 C2H status=0x%08x\n", DRIVER_NAME, val);
+			if ((val & BIT(0)) == 0x0)
+				break;
+			udelay(10);
+		}
 
 		/* Step 4: Read C2H descriptor count */
 		val = ioread32(drvdata->bar1_virt_addr + 0x1048);
@@ -312,7 +337,11 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		val = ioread32(drvdata->bar1_virt_addr + 0x1040);
 		pr_info("%s: Step 5 C2H status=0x%08x\n", DRIVER_NAME, val);
 
-		pr_info("%s: buffer=0x%08x\n", DRIVER_NAME, buffer);
+		memcpy(&buf, kbuf, bytes_to_transfer);
+		pr_info("%s: buf=0x%08x\n", DRIVER_NAME, buf);
+
+		dma_free_coherent(&drvdata->pdev->dev, bytes_to_transfer, kbuf,
+				  dma_addr);
 
 		break;
 
@@ -434,6 +463,10 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 		return ret;
 	}
 
+	/* Enable the device as a PCI bus master. This is crucial for DMA. */
+	pci_set_master(pdev);
+	pr_info("%s: PCI device enabled as bus master.\n", DRIVER_NAME);
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 	/* Request and map BAR0 - status/control register */
 	drvdata->bar0_virt_addr = pcim_iomap_region(pdev, 0, "fpga_pci_bar0");
@@ -515,23 +548,23 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 		DRIVER_NAME, XDMA_DESC_BLOCK_SIZE);
 
 	/* Allocate a buffer from the DMA pool */
-	drvdata->dma_buffer_size = XDMA_DESC_BLOCK_SIZE;
-	drvdata->dma_buffer_virt = dma_pool_alloc(drvdata->desc_pool,
-						  GFP_KERNEL,
-						  &drvdata->dma_buffer_phys);
-	if (!drvdata->dma_buffer_virt) {
+	drvdata->dma_desc_size = XDMA_DESC_BLOCK_SIZE;
+	drvdata->dma_desc_virt = dma_pool_alloc(drvdata->desc_pool,
+						GFP_KERNEL,
+						&drvdata->dma_desc_phys);
+	if (!drvdata->dma_desc_virt) {
 		pr_err("%s: Failed to allocated DMA coherent buffer from pool of size %zu.\n",
-		       DRIVER_NAME, drvdata->dma_buffer_size);
+		       DRIVER_NAME, drvdata->dma_desc_size);
 		dma_pool_destroy(drvdata->desc_pool);
 		return -ENOMEM;
 	}
 	pr_info("%s: DMA pool buffer allocated: virt=%p, phys=0x%llx, size=%zu\n",
-		DRIVER_NAME, drvdata->dma_buffer_virt,
-		(unsigned long long)drvdata->dma_buffer_phys,
-		drvdata->dma_buffer_size);
+		DRIVER_NAME, drvdata->dma_desc_virt,
+		(unsigned long long)drvdata->dma_desc_phys,
+		drvdata->dma_desc_size);
 
-	/* Initialize DMA buffer */
-	memset(drvdata->dma_buffer_virt, 0, drvdata->dma_buffer_size);
+	/* Initialize DMA descriptor */
+	memset(drvdata->dma_desc_virt, 0, drvdata->dma_desc_size);
 
 	/* Request the device number */
 	ret = alloc_chrdev_region(&luxyd_ai_major, 0, 1, DRIVER_NAME);
@@ -603,12 +636,13 @@ static void luxyd_fpga_remove(struct pci_dev *pdev)
 	/* Unregister device number */
 	unregister_chrdev_region(luxyd_ai_major, 1);
 
-	/* Free DMA buffer */
-	if (drvdata->dma_buffer_virt) {
-		dma_free_coherent(&pdev->dev, drvdata->dma_buffer_size,
-				  drvdata->dma_buffer_virt,
-				  drvdata->dma_buffer_phys);
-	}
+	/* Free DMA descriptor */
+	if (drvdata->dma_desc_virt && drvdata->desc_pool)
+		dma_pool_free(drvdata->desc_pool, drvdata->dma_desc_virt,
+			      drvdata->dma_desc_phys);
+
+	if (drvdata->desc_pool)
+		dma_pool_destroy(drvdata->desc_pool);
 }
 
 /* PCI driver structure */
