@@ -185,7 +185,7 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 		       DRIVER_NAME);
 		return PTR_ERR(drvdata->bar0_virt_addr);
 	}
-	pr_info("%s: BAR0 mapped to %p, length 0x%1x.\n", DRIVER_NAME,
+	pr_info("%s: BAR0 mapped to %p, length 0x%llx.\n", DRIVER_NAME,
 		drvdata->bar0_virt_addr, pci_resource_len(pdev, 0));
 
 	/* Request and map BAR1 - on-board memory */
