@@ -166,12 +166,13 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	size_t bytes_to_transfer;
 	int timeout;
 	int ret = 0;
-	static struct matrix_size matrix_size;
-	u16 *a_matrix, *b_matrix;
-	u32 *p_matrix, sum;
-	int i, j, k;
+	static struct matrix_info matrix_info;
+	//u16 *a_matrix, *b_matrix;
+	//u32 *p_matrix, sum;
+	//int i, j, k;
 	dma_addr_t dma_addr;
 	char *kbuf;
+	u16 *kbuf_a;
 	u32 buf;
 	u32 val;
 
@@ -212,24 +213,41 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	case LUXYD_AI_MATRIX_LOAD:
 		pr_info("%s: ioctl cmd LUXYD_AI_MATRIX_LOAD\n", DRIVER_NAME);
 
-		if (copy_from_user(&matrix_size,
-				   (struct matrix_size __user *)arg,
-				   sizeof(struct matrix_size))) {
+		if (copy_from_user(&matrix_info,
+				   (struct matrix_info __user *)arg,
+				   sizeof(struct matrix_info))) {
 			ret = -EFAULT;
 			break;
 		}
 
-		if (matrix_size.m <= 0 ||
-		    matrix_size.n <= 0 ||
-		    matrix_size.p <= 0) {
+		if (matrix_info.m <= 0 ||
+		    matrix_info.n <= 0 ||
+		    matrix_info.p <= 0) {
 			ret = -EINVAL;
 			break;
 		}
 
-		val = FIELD_PREP(LUXYD_AI_MATA_ROWCOUNT, matrix_size.m) |
-			FIELD_PREP(LUXYD_AI_MATA_COLCOUNT, matrix_size.n) |
-			FIELD_PREP(LUXYD_AI_MATB_ROWCOUNT, matrix_size.n) |
-			FIELD_PREP(LUXYD_AI_MATB_COLCOUNT, matrix_size.p);
+		bytes_to_transfer = matrix_info.m * matrix_info.n * sizeof(u16);
+		kbuf_a = devm_kzalloc(&drvdata->pdev->dev, bytes_to_transfer,
+				      GFP_KERNEL);
+		memcpy(kbuf_a, &matrix_info.mat_a, bytes_to_transfer);
+		//pr_info("%s: bytes_to_transfer=%lu mat_a size %lu\n",
+		//	DRIVER_NAME, bytes_to_transfer, sizeof(kbuf_a));
+		//pr_info("%s: kbuf_a=0x%x\n", DRIVER_NAME, *kbuf_a);
+
+#if 0
+		/* Show matrix A data */
+		for (i = 0; i < matrix_info.m; i++) {
+			for (j = 0; j < matrix_info.n; j++) {
+				pr_info("%5d ", matrix_info.mat_a[i * matrix_info.n + j]);
+                }
+                pr_info("\n");
+#endif
+
+		val = FIELD_PREP(LUXYD_AI_MATA_ROWCOUNT, matrix_info.m) |
+			FIELD_PREP(LUXYD_AI_MATA_COLCOUNT, matrix_info.n) |
+			FIELD_PREP(LUXYD_AI_MATB_ROWCOUNT, matrix_info.n) |
+			FIELD_PREP(LUXYD_AI_MATB_COLCOUNT, matrix_info.p);
 		iowrite32(val, drvdata->bar0_virt_addr + LUXYD_AI_INFO_OFFSET);
 
 		val = ioread32(drvdata->bar0_virt_addr + LUXYD_AI_INFO_OFFSET);
@@ -297,7 +315,8 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		val = ioread32(drvdata->bar1_virt_addr + 0x0040);
 		pr_info("%s: Step 6 H2C status=0x%08x\n", DRIVER_NAME, val);
 
-		buf = 0;
+		buf = 0xffffffff;
+		pr_info("%s: set buf to all ones buf=0x%08x\n", DRIVER_NAME, buf);
 
 		/* Fill up the descriptor */
 		mata_desc->control = XDMA_DESC_CONTROL(1, 0x13); // 0xad4b0013
@@ -338,7 +357,7 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		pr_info("%s: Step 5 C2H status=0x%08x\n", DRIVER_NAME, val);
 
 		memcpy(&buf, kbuf, bytes_to_transfer);
-		pr_info("%s: buf=0x%08x\n", DRIVER_NAME, buf);
+		pr_info("%s: readback buf=0x%08x\n", DRIVER_NAME, buf);
 
 		dma_free_coherent(&drvdata->pdev->dev, bytes_to_transfer, kbuf,
 				  dma_addr);
@@ -349,6 +368,7 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		pr_info("%s: ioctl cmd LUXYD_AI_MATRIX_MULTIPLY\n",
 			DRIVER_NAME);
 
+#if 0
 		if (!drvdata->bar1_virt_addr) {
 			pr_err("%s: BAR1 unknown physical address\n",
 			       DRIVER_NAME);
@@ -361,16 +381,17 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		p_matrix = (u32 *)(drvdata->bar1_virt_addr + MATRIXP_OFFSET);
 
 		/* Matrix multiplication */
-		for (i = 0; i < matrix_size.m; i++) {
-			for (j = 0; j < matrix_size.p; j++) {
+		for (i = 0; i < matrix_info.m; i++) {
+			for (j = 0; j < matrix_info.p; j++) {
 				sum = 0;
-				for (k = 0; k < matrix_size.n; k++) {
-					sum += a_matrix[i * matrix_size.n + k] *
-						b_matrix[k * matrix_size.p + j];
+				for (k = 0; k < matrix_info.n; k++) {
+					sum += a_matrix[i * matrix_info.n + k] *
+						b_matrix[k * matrix_info.p + j];
 				}
-				p_matrix[i * matrix_size.p + j] = sum;
+				p_matrix[i * matrix_info.p + j] = sum;
 			}
 		}
+#endif
 
 		pr_info("%s: Matrix P ready\n", DRIVER_NAME);
 		break;

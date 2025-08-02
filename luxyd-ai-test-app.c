@@ -9,7 +9,7 @@
 #include "luxyd-ai-ioctl.h"
 
 #define LUXYD_AI_DEVICE		"/dev/luxyd-ai"
-#define BUFSIZE			(16*1024*1024)
+#define BUFSIZE			(64*1024)
 
 __u16 a[32*32];
 __u16 b[32*32];
@@ -19,20 +19,23 @@ int main(void)
 {
 	int fd;
 	unsigned int val;
-	unsigned long page_size;
-	void *buf;
-	size_t bufsize;
+	//unsigned long page_size;
+	//void *buf;
+	//size_t bufsize;
 	int ret = 0;
 
-	struct matrix_size matrix_size;
-	__u16 *a_matrix, *b_matrix;
-	__u32 *p_matrix;
+	struct matrix_info matrix_info;
+	//__u16 *a_matrix, *b_matrix;
+	//__u32 *p_matrix;
 	int i, j;
 
 	/* Set the row and column size for matrix A, B and P */
-	matrix_size.m = 32;
-	matrix_size.n = 32;
-	matrix_size.p = 32;
+	matrix_info.m = 8;
+	matrix_info.n = 8;
+	matrix_info.p = 8;
+
+	matrix_info.mat_a = a;
+	matrix_info.mat_b = b;
 
 	printf("\n----- LUXYD AI Test Application -----\n");
 
@@ -41,6 +44,7 @@ int main(void)
 	if (fd < 0)
 		return fd;
 
+#if 0
 	/* Align to PAGE_SIZE */
 	page_size = sysconf(_SC_PAGE_SIZE);
 	bufsize = (BUFSIZE + page_size - 1) & ~(page_size - 1);
@@ -55,26 +59,28 @@ int main(void)
 	b_matrix = (__u16 *)(buf + MATRIXB_OFFSET);
 	p_matrix = (__u32 *)(buf + MATRIXP_OFFSET);
 	memset(buf, 0, bufsize);
+#endif
 
 	/* Fill up matrix A (mxn)*/
-	for (i = 0; i < matrix_size.m; i++) {
-		for (j = 0; j < matrix_size.n; j++) {
-			a[i * matrix_size.n + j] = (i + 1) * 2 + (j + 1);
-			a_matrix[i * matrix_size.n + j] = (i + 1) * 2 + (j + 1);
+	for (i = 0; i < matrix_info.m; i++) {
+		for (j = 0; j < matrix_info.n; j++) {
+			a[i * matrix_info.n + j] = (i + 1) * 2 + (j + 1);
 		}
 	}
 
 	/* Fill up matrix B (nxp) */
-	for (i = 0; i < matrix_size.n; i++) {
-		for (j = 0; j < matrix_size.p; j++) {
-			b[i * matrix_size.p + j] = (i + 1) * 4 + (j + 1);
-			b_matrix[i * matrix_size.p + j] = (i + 1) * 4 + (j + 1);
+	for (i = 0; i < matrix_info.n; i++) {
+		for (j = 0; j < matrix_info.p; j++) {
+			b[i * matrix_info.p + j] = (i + 1) * 4 + (j + 1);
 		}
 	}
 
+	printf("DEBUG matrix_info.mat_a=%hn a[0]=%hu\n",
+	       (__u16 *)matrix_info.mat_a, a[0]);
+
 	/* Send matrix size information */
 	printf("[%s] LUXYD_AI_MATRIX_LOAD sending command\n", LUXYD_AI_DEVICE);
-	ret = ioctl(fd, LUXYD_AI_MATRIX_LOAD, &matrix_size);
+	ret = ioctl(fd, LUXYD_AI_MATRIX_LOAD, &matrix_info);
 	if (ret) {
 		printf("[%s] LUXYD_AI_MATRIX_LOAD failed\n", LUXYD_AI_DEVICE);
 		goto err;
@@ -83,6 +89,7 @@ int main(void)
 	printf("[%s] Matrices size information are sent successfully\n",
 	       LUXYD_AI_DEVICE);
 
+#if 0
 	/* Trigger multiplication */
 	printf("[%s] LUXYD_AI_MATRIX_MULTIPLY sending command\n",
 	       LUXYD_AI_DEVICE);
@@ -122,9 +129,8 @@ int main(void)
 
 	printf("\n");
 
-
-
 	goto err;
+#endif
 
 	printf("[%s] LUXYD_AI_STATUS_GET test start\n", LUXYD_AI_DEVICE);
 	ret = ioctl(fd, LUXYD_AI_STATUS_GET, &val);
@@ -158,12 +164,14 @@ int main(void)
 	printf("[%s] LUXYD_AI_INFERENCE_START test success\n", LUXYD_AI_DEVICE);
 
 err:
+#if 0
 	if (buf) {
 		ret = munmap(buf, bufsize);
 
 		if (ret < 0)
 			printf("[%s] Failed to unmap memory\n", LUXYD_AI_DEVICE);
 	}
+#endif
 
 	/* Clean up */
 	printf("[%s] Closing device\n", LUXYD_AI_DEVICE);

@@ -21,10 +21,14 @@
 #define MATRIXB_OFFSET			0x2000
 #define MATRIXP_OFFSET			0x4000
 
-struct matrix_size {
-	int m;  /* Matrix A row size, matrix AB row size */
-	int n;  /* Matrix A column size, matrix B row size */
-	int p;  /* Matrix B column size, matrix AB column size */
+struct matrix_info {
+	int m;		/* Matrix A row size, matrix AB row size */
+	int n;		/* Matrix A column size, matrix B row size */
+	int p;		/* Matrix B column size, matrix AB column size */
+
+	void *mat_a;	/* Matrix A data */
+	void *mat_b;	/* Matrix B data */
+	void *mat_p;	/* Matrix P data */
 };
 
 int luxyd_dev_open(const char *devname);
