@@ -8,35 +8,55 @@
 #include "luxyd-ai-ioctl.h"
 
 #define LUXYD_AI_DEVICE		"/dev/luxyd-ai"
-#define BUFSIZE			(16*1024*1024)
 
 int main(void)
 {
+	struct matrix_info matrix_info;
 	int fd;
 	unsigned int val;
-	unsigned long page_size;
 	void *buf;
-	size_t bufsize;
+	int bufsize;
+	int size;
+	int i, j;
 	int ret = 0;
+
+	/* Row and column size of Matrix A, B and P */
+	matrix_info.m = 8;
+	matrix_info.n = 8;
+	matrix_info.p = 8;
+
+	/* Fill up matrix A */
+	size = matrix_info.m * matrix_info.n * sizeof(__u16);
+	matrix_info.a_ptr = malloc(size);
+
+	for (i = 0; i < matrix_info.m; i++) {
+		for (j = 0; j < matrix_info.n; j++) {
+			matrix_info.a_ptr[i * matrix_info.n + j] = (i + 1) * 2 + (j + 1);
+		}
+	}
+
+
+	/* Fill up matrix B */
+	size = matrix_info.n * matrix_info.p * sizeof(__u16);
+	matrix_info.b_ptr = malloc(size);
+
+	for (i = 0; i < matrix_info.n; i++) {
+		for (j = 0; j < matrix_info.p; j++) {
+			matrix_info.b_ptr[i * matrix_info.p + j] = (i + 1) * 4 + (j + 1);
+		}
+	}
+
 
 	printf("\n----- LUXYD AI Test Application -----\n");
 
-	printf("[%s] Opening device\n", LUXYD_AI_DEVICE);
-	fd = open(LUXYD_AI_DEVICE, O_RDWR);
-	if (fd < 0) {
-		printf("[%s] Cannot open device file\n", LUXYD_AI_DEVICE);
+	fd = luxyd_dev_open(LUXYD_AI_DEVICE);
+	if (fd < 0)
 		return fd;
-	}
 
-	/* Align to PAGE_SIZE */
-	page_size = sysconf(_SC_PAGE_SIZE);
-	bufsize = (BUFSIZE + page_size - 1) & ~(page_size - 1);
-
-	buf = mmap(NULL, bufsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	if (buf == MAP_FAILED) {
-		printf("[%s] Failed to mmap device memory\n", LUXYD_AI_DEVICE);
+	bufsize = (32 * 32 * 3 * sizeof(__u32));
+	buf = luxyd_dev_init(fd, &bufsize);
+	if (!buf)
 		goto err;
-	}
 
 	printf("[%s] LUXYD_AI_STATUS_GET test start\n", LUXYD_AI_DEVICE);
 	ret = ioctl(fd, LUXYD_AI_STATUS_GET, &val);
@@ -70,16 +90,7 @@ int main(void)
 	printf("[%s] LUXYD_AI_INFERENCE_START test success\n", LUXYD_AI_DEVICE);
 
 err:
-	if (buf) {
-		ret = munmap(buf, bufsize);
-
-		if (ret < 0)
-			printf("[%s] Failed to unmap memory\n", LUXYD_AI_DEVICE);
-	}
-
-	/* Clean up */
-	printf("[%s] Closing device\n", LUXYD_AI_DEVICE);
-	close(fd);
+	luxyd_dev_close(fd, buf, bufsize);
 
 	return ret;
 }
