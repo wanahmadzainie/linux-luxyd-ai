@@ -18,9 +18,9 @@ struct matrix_info {
 	int n;		/* Matrix A column size, matrix B row size */
 	int p;		/* Matrix B column size, matrix AB column size */
 
-	__u16 *a_ptr;	/* Matrix A data */
-	__u16 *b_ptr;	/* Matrix B data */
-	__u32 *p_ptr;	/* Matrix P data */
+	int a_pos;	/* offset to Matrix A data location */
+	int b_pos;	/* offset to Matrix B data location */
+	int p_pos;	/* offset to Matrix P data location */
 };
 
 /* IOCTL commands */
@@ -29,7 +29,7 @@ struct matrix_info {
 #define LUXYD_AI_MODEL_LOAD		_IOW(LUXYD_AI_IOCTL_MAGIC, 2, __u32)
 #define LUXYD_AI_INFERENCE_START	_IOWR(LUXYD_AI_IOCTL_MAGIC, 3, __u32)
 #define LUXYD_AI_MATRIX_LOAD		_IOW(LUXYD_AI_IOCTL_MAGIC, 4, struct matrix_info)
-#define LUXYD_AI_MATRIX_MULTIPLY	_IOW(LUXYD_AI_IOCTL_MAGIC, 5, __u32)
+#define LUXYD_AI_MATRIX_MULTIPLY	_IOR(LUXYD_AI_IOCTL_MAGIC, 5, struct matrix_info)
 
 int luxyd_dev_open(const char *devname);
 void *luxyd_dev_init(int fd, int *mmap_size);
