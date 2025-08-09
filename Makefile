@@ -37,3 +37,10 @@ test:
 	sudo $(PWD)/luxyd-ai-test-app
 	sudo rmmod luxyd_ai
 	sudo dmesg
+
+load:
+	sudo dmesg -C
+	-sudo rmmod luxyd_ai
+	sudo insmod luxyd-ai.ko
+	sudo rmmod luxyd_ai
+	sudo dmesg
