@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -45,6 +46,8 @@ void *luxyd_dev_init(int fd, int *mmap_size)
 		printf("[%s] failed to mmap device memory\n", DRIVER_NAME);
 		return NULL;
 	}
+
+	memset(mmap_ptr, 0xff, *mmap_size);
 
 	printf("[%s] device memory mapped at address %p\n",
 	       DRIVER_NAME, mmap_ptr);
@@ -95,7 +98,7 @@ int luxyd_dev_matrix_multiply(int fd, void *mmap_ptr,
 	       DRIVER_NAME);
 	ret = ioctl(fd, LUXYD_AI_MATRIX_MULTIPLY, matrix_info);
 	if (ret) {
-		printf("[%s] LUXYD_AI_MATRIX_LOAD failed\n", DRIVER_NAME);
+		printf("[%s] LUXYD_AI_MATRIX_MULTIPLY failed\n", DRIVER_NAME);
 		return ret;
 	}
 

@@ -18,9 +18,9 @@ struct matrix_info {
 	int n;		/* Matrix A column size, matrix B row size */
 	int p;		/* Matrix B column size, matrix AB column size */
 
-	int a_pos;	/* offset to Matrix A data location */
-	int b_pos;	/* offset to Matrix B data location */
-	int p_pos;	/* offset to Matrix P data location */
+	__u64 addr_a;	/* Address of Matrix A data in device mapped memory */
+	__u64 addr_b;	/* Address of Matrix B data in device mapped memory */
+	__u64 addr_p;	/* Address of Matrix P data in device mapped memory */
 };
 
 /* IOCTL commands */
