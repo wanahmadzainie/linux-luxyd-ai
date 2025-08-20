@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "luxyd-ai-ioctl.h"
@@ -50,6 +51,8 @@ int main(void)
 	__u32 *p_data;
 	int i, j;
 	int ret = 0;
+	struct timespec start_time, end_time;
+	double elapsed_seconds;
 
 	printf("\n----- LUXYD AI Test Application -----\n");
 
@@ -120,7 +123,9 @@ int main(void)
 	//sleep(1); memset(mmap_ptr, 0, mmap_size); sleep(1);
 
 	/* Send command to start multiplication and get result as Matrix P */
+	clock_gettime(CLOCK_MONOTONIC_RAW, &start_time);
 	ret = luxyd_dev_matrix_multiply(fd, mmap_ptr, &matrix_info);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &end_time);
 	if (ret < 0)
 		goto err;
 
@@ -132,6 +137,10 @@ int main(void)
 	display_matrix16(matrix_info.n, matrix_info.p, (__u16 *)matrix_info.addr_b);
 	printf("Matrix P (%dx%d):\n", matrix_info.m, matrix_info.p);
 	display_matrix32(matrix_info.m, matrix_info.p, (__u32 *)matrix_info.addr_p);
+
+	elapsed_seconds = (end_time.tv_sec - start_time.tv_sec) +
+		(double)(end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+	printf("Time taken by luxyd_dev_matrix_multiply: %.9f seconds\n", elapsed_seconds);
 
 err:
 	/* Dealloc memory used by the matrices */

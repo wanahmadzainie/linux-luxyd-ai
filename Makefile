@@ -44,3 +44,6 @@ load:
 	sudo insmod luxyd-ai.ko
 	sudo rmmod luxyd_ai
 	sudo dmesg
+
+run:
+	sudo $(PWD)/luxyd-ai-test-app
