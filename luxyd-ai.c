@@ -400,7 +400,7 @@ static long luxyd_ai_unlocked_ioctl(struct file *filp, unsigned int cmd,
 		pr_info("REG_READ(CMD_REG)    0x%08x\n", val);
 		val = ioread32(drvdata->bar0_virt_addr + LUXYD_AI_INFO_OFFSET);
 		pr_info("REG_READ(INFO_REG)   0x%08x\n", val);
-		ioread32(drvdata->bar0_virt_addr + LUXYD_AI_STATUS_OFFSET);
+		val = ioread32(drvdata->bar0_virt_addr + LUXYD_AI_STATUS_OFFSET);
 		pr_info("REG_READ(STATUS_REG) 0x%08x\n", val);
 
 		/* Send command to start matrix multiplication */
@@ -580,8 +580,8 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 	if (!drvdata->dma_desc_virt) {
 		pr_err("failed to allocate DMA coherent buffer from pool of size %zu.\n",
 		       drvdata->dma_desc_size);
-		dma_pool_destroy(drvdata->dma_desc_pool);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out_destroy_dma_pool;
 	}
 	pr_info("DMA pool buffer allocated: virt=%p, phys=0x%llx, size=%zu\n",
 		drvdata->dma_desc_virt, (unsigned long long)drvdata->dma_desc_phys,
@@ -595,7 +595,8 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 						      GFP_KERNEL);
 	if (!drvdata->dma_buffer_virt) {
 		pr_err("failed to allocate DMA coherent buffer for mmap\n");
-		dma_pool_destroy(drvdata->dma_desc_pool);
+		ret = -ENOMEM;
+		goto out_free_dma_pool;
 	}
 	memset(drvdata->dma_buffer_virt, 0, drvdata->dma_buffer_size);
 	pr_info("Coherent buffer allocated: virt=%p, phys=0x%llx, size=%zu\n",
@@ -606,7 +607,7 @@ static int luxyd_fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id
 	ret = alloc_chrdev_region(&luxyd_ai_major, 0, 1, DRIVER_NAME);
 	if (ret) {
 		dev_err(dev, "failed to allocate major number: %d\n", ret);
-		return ret;
+		goto out_free_dma_coherent;
 	}
 
 	/* Initialize the character device and add it to userspace */
@@ -645,8 +646,15 @@ out_delete_cdev:
 out_dealloc_region:
 	unregister_chrdev_region(luxyd_ai_major, 1);
 
+out_free_dma_coherent:
 	dma_free_coherent(dev, drvdata->dma_buffer_size,
 			  drvdata->dma_buffer_virt, drvdata->dma_buffer_phys);
+
+out_free_dma_pool:
+	dma_pool_free(drvdata->dma_desc_pool, drvdata->dma_desc_virt,
+		      drvdata->dma_desc_phys);
+
+out_destroy_dma_pool:
 	dma_pool_destroy(drvdata->dma_desc_pool);
 
 	return ret;
@@ -658,9 +666,17 @@ static void luxyd_fpga_remove(struct pci_dev *pdev)
 
 	pr_info("removing device 0x%04x:0x%04x\n", pdev->vendor, pdev->device);
 
-	if (!drvdata) {
+	if (drvdata) {
+		/* free DMA coherent buffer */
+		dma_free_coherent(&drvdata->pdev->dev, drvdata->dma_buffer_size,
+				  drvdata->dma_buffer_virt, drvdata->dma_buffer_phys);
+
+		/* free and destroy DMA pool */
+		dma_pool_free(drvdata->dma_desc_pool, drvdata->dma_desc_virt,
+			      drvdata->dma_desc_phys);
+		dma_pool_destroy(drvdata->dma_desc_pool);
+	} else {
 		pr_err("no private data found\n");
-		return;
 	}
 
 	/* Destroy device node */
@@ -674,16 +690,6 @@ static void luxyd_fpga_remove(struct pci_dev *pdev)
 
 	/* Unregister device number */
 	unregister_chrdev_region(luxyd_ai_major, 1);
-
-	/* DMA cleanup */
-	if (drvdata->dma_buffer_size)
-		dma_free_coherent(&drvdata->pdev->dev, drvdata->dma_buffer_size,
-				  drvdata->dma_buffer_virt,
-				  drvdata->dma_buffer_phys);
-
-	dma_pool_free(drvdata->dma_desc_pool, drvdata->dma_desc_virt,
-		      drvdata->dma_desc_phys);
-	dma_pool_destroy(drvdata->dma_desc_pool);
 }
 
 /* PCI driver structure */
@@ -698,7 +704,7 @@ static int __init luxyd_ai_init(void)
 {
 	int ret;
 
-	pr_info("ver%s loading\n", DRIVER_VERSION);
+	pr_info("module ver%s loading\n", DRIVER_VERSION);
 
 	/* Register PCI driver */
 	ret = pci_register_driver(&luxyd_ai_pci_driver);
@@ -707,19 +713,19 @@ static int __init luxyd_ai_init(void)
 		return ret;
 	}
 
-	pr_info("ver%s loaded\n", DRIVER_VERSION);
+	pr_info("module ver%s loaded\n", DRIVER_VERSION);
 
 	return 0;
 }
 
 static void __exit luxyd_ai_cleanup(void)
 {
-	pr_info("ver%s unloading\n", DRIVER_VERSION);
+	pr_info("module ver%s unloading\n", DRIVER_VERSION);
 
 	/* Unregister PCI driver */
 	pci_unregister_driver(&luxyd_ai_pci_driver);
 
-	pr_info("ver%s unloaded\n", DRIVER_VERSION);
+	pr_info("module ver%s unloaded\n", DRIVER_VERSION);
 }
 
 module_init(luxyd_ai_init);
