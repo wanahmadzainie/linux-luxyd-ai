@@ -14,6 +14,8 @@
 #define DRIVER_NAME	"luxyd-fpga-pci"
 #define DRIVER_VERSION	"0.1"
 
+#define DMA_SIZE_MAX	(4 * 1024 * 1024)
+
 struct fpga_device {
 	struct pci_dev *pdev;
 
@@ -21,6 +23,10 @@ struct fpga_device {
 	dev_t dev_node;
 	struct class *class;
 	struct device *device;
+
+	void *dma_buf_virt;
+	dma_addr_t dma_buf_phys;
+	size_t dma_buf_size;
 };
 
 static int
@@ -88,6 +94,18 @@ fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	priv->pdev = pdev;
 	pci_set_drvdata(pdev, priv);
+
+	priv->dma_buf_size = DMA_SIZE_MAX;
+	priv->dma_buf_virt = dmam_alloc_coherent(&pdev->dev, priv->dma_buf_size,
+						 &priv->dma_buf_phys,
+						 GFP_KERNEL);
+	if (!priv->dma_buf_virt) {
+		pr_err("failed to allocate DMA coherent buffer\n");
+		return -ENOMEM;
+	}
+
+	pr_info("DMA buffer allocated at virt=%p, phys=%pad, size=%zu\n",
+		priv->dma_buf_virt, &priv->dma_buf_phys, priv->dma_buf_size);
 
 	ret = alloc_chrdev_region(&priv->dev_node, 0, 1, DEVICE_NAME);
 	if (ret) {
