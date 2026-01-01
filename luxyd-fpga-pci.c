@@ -5,31 +5,153 @@
 
 #define pr_fmt(fmt)	KBUILD_MODNAME ": %s: " fmt, __func__
 
+#include <linux/cdev.h>
+#include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 
+#define DEVICE_NAME	"luxyd_fpga"
 #define DRIVER_NAME	"luxyd-fpga-pci"
 #define DRIVER_VERSION	"0.1"
 
-static int fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+struct fpga_device {
+	struct pci_dev *pdev;
+
+	struct cdev cdev;
+	dev_t dev_node;
+	struct class *class;
+	struct device *device;
+};
+
+static int
+fpga_open(struct inode *inode, struct file *file)
 {
-	struct device *dev = &pdev->dev;
+	struct fpga_device *priv;
 
-	pr_info("probing device 0x%04x:0x%04x\n", pdev->vendor, pdev->device);
+	priv = container_of(inode->i_cdev, struct fpga_device, cdev);
+	file->private_data = priv;
 
-	/* driver initialization */
-
-	dev_info(dev, "probed\n");
+	pr_info("device opened\n");
 	return 0;
 }
 
-static void fpga_remove(struct pci_dev *pdev)
+static int
+fpga_release(struct inode *inode, struct file *file)
+{
+	pr_info("device released\n");
+	return 0;
+}
+
+static ssize_t
+fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+	pr_info("device write\n");
+	return 0;
+}
+
+static ssize_t
+fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+	pr_info("device read\n");
+	return 0;
+}
+
+static long
+fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	pr_info("device ioctl\n");
+	return 0;
+}
+
+static const struct file_operations fpga_fops = {
+	.owner		= THIS_MODULE,
+	.open		= fpga_open,
+	.release	= fpga_release,
+	.read		= fpga_read,
+	.write		= fpga_write,
+	.unlocked_ioctl	= fpga_ioctl,
+};
+
+static int
+fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct device *dev = &pdev->dev;
+	struct fpga_device *priv;
+	int ret;
+
+	pr_info("probing device 0x%04x:0x%04x\n", pdev->vendor, pdev->device);
+
+	/* Allocate private data structure */
+	priv = devm_kzalloc(dev, sizeof(priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	priv->pdev = pdev;
+	pci_set_drvdata(pdev, priv);
+
+	ret = alloc_chrdev_region(&priv->dev_node, 0, 1, DEVICE_NAME);
+	if (ret) {
+		pr_err("failed to allocate chrdev region\n");
+		return ret;
+	}
+
+	cdev_init(&priv->cdev, &fpga_fops);
+	priv->cdev.owner = THIS_MODULE;
+	ret = cdev_add(&priv->cdev, priv->dev_node, 1);
+	if (ret) {
+		pr_err("failed to add cdev\n");
+		goto out_unregister_chrdev;
+	}
+
+	priv->class = class_create(DEVICE_NAME);
+	if (IS_ERR(priv->class)) {
+		pr_err("failed to allocate class\n");
+		ret = PTR_ERR(priv->class);
+		goto out_delete_cdev;
+        }
+
+	priv->device = device_create(priv->class, NULL, priv->dev_node,  NULL,
+				     DEVICE_NAME);
+	if (IS_ERR(priv->device)) {
+		pr_err("failed to create device\n");
+		ret = PTR_ERR(priv->device);
+		goto out_unroll_device;
+	}
+
+	dev_info(dev, "probed\n");
+	return 0;
+
+out_unroll_device:
+	class_destroy(priv->class);
+
+out_delete_cdev:
+	cdev_del(&priv->cdev);
+
+out_unregister_chrdev:
+	unregister_chrdev_region(priv->dev_node, 1);
+
+	return ret;
+}
+
+static void
+fpga_remove(struct pci_dev *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct fpga_device *priv;
 
 	pr_info("removing device 0x%04x:0x%04x\n", pdev->vendor, pdev->device);
 
-	/* driver clean up */
+	priv = pci_get_drvdata(pdev);
+	if (priv) {
+		if (priv->device)
+			device_destroy(priv->class, priv->dev_node);
+
+		if (priv->class && !IS_ERR(priv->class))
+			class_destroy(priv->class);
+
+		cdev_del(&priv->cdev);
+		unregister_chrdev_region(priv->dev_node, 1);
+	}
 
 	dev_info(dev, "removed\n");
 }
