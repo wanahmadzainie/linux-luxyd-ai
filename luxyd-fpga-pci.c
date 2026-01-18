@@ -14,7 +14,7 @@
 #define DRIVER_NAME	"luxyd-fpga-pci"
 #define DRIVER_VERSION	"0.1"
 
-#define DMA_SIZE_MAX	(4 * 1024 * 1024)
+#define DMA_SIZE_MAX	(512 * 1024 * 1024)
 
 struct fpga_device {
 	struct pci_dev *pdev;
@@ -28,6 +28,23 @@ struct fpga_device {
 	dma_addr_t dma_buf_phys;
 	size_t dma_buf_size;
 };
+
+static int
+fpga_do_dma(struct fpga_device *priv, void *data, size_t len, int dir)
+{
+	if (len > priv->dma_buf_size)
+		return -ENOMEM;
+
+	/* Dummy write - copy data to DMA buffer */
+	if (dir == DMA_TO_DEVICE)
+		memcpy(priv->dma_buf_virt, data, len);
+
+	/* Dummy read - copy data from DMA buffer */
+	if (dir == DMA_FROM_DEVICE)
+		memcpy(data, priv->dma_buf_virt, len);
+
+	return len;
+}
 
 static int
 fpga_open(struct inode *inode, struct file *file)
@@ -49,17 +66,70 @@ fpga_release(struct inode *inode, struct file *file)
 }
 
 static ssize_t
-fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	pr_info("device write\n");
-	return 0;
+	struct fpga_device *priv = file->private_data;
+	void *kbuf;
+	int ret;
+
+	if (count > priv->dma_buf_size) {
+		dev_err(&priv->pdev->dev, "read size %zu exceeds limit %ld\n",
+			count, priv->dma_buf_size);
+		return -EINVAL;
+	}
+
+	kbuf = kzalloc(count, GFP_KERNEL);
+	if (!kbuf) {
+		dev_err(&priv->pdev->dev, "failed to allocate buffer for read\n");
+		return -ENOMEM;
+	}
+
+	ret = fpga_do_dma(priv, kbuf, count, DMA_FROM_DEVICE);
+	if (ret < 0)
+		goto out;
+
+	if (copy_to_user(buf, kbuf, count)) {
+		dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
+		ret = -EFAULT;
+	}
+
+out:
+	kfree(kbuf);
+
+	pr_info("device read\n");
+	return ret;
 }
 
 static ssize_t
-fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
-	pr_info("device read\n");
-	return 0;
+	struct fpga_device *priv = file->private_data;
+	void *kbuf;
+	int ret;
+
+	if (count > DMA_SIZE_MAX) {
+		dev_err(&priv->pdev->dev, "write size %zu exceeds limit %ld\n",
+			count, priv->dma_buf_size);
+		return -EINVAL;
+	}
+
+	kbuf = kmalloc(count, GFP_KERNEL);
+	if (!kbuf) {
+		dev_err(&priv->pdev->dev, "failed to allocate buffer for write\n");
+		return -ENOMEM;
+	}
+
+	if (copy_from_user(kbuf, buf, count)) {
+		dev_err(&priv->pdev->dev, "failed to copy_from_user in write\n");
+		kfree(kbuf);
+		return -EFAULT;
+	}
+
+	ret = fpga_do_dma(priv, kbuf, count, DMA_TO_DEVICE);
+	kfree(kbuf);
+
+	pr_info("device write\n");
+	return ret;
 }
 
 static long
@@ -95,6 +165,17 @@ fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	priv->pdev = pdev;
 	pci_set_drvdata(pdev, priv);
 
+	/* Enable DMA */
+	ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret)
+		ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+	if (ret) {
+		pr_err("no suitable DMA support available\n");
+		return ret;
+	}
+
+	pr_info("DMA coherent mask is set.\n");
+
 	priv->dma_buf_size = DMA_SIZE_MAX;
 	priv->dma_buf_virt = dmam_alloc_coherent(&pdev->dev, priv->dma_buf_size,
 						 &priv->dma_buf_phys,
@@ -103,6 +184,8 @@ fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		pr_err("failed to allocate DMA coherent buffer\n");
 		return -ENOMEM;
 	}
+
+	memset(priv->dma_buf_virt, 0, DMA_SIZE_MAX);
 
 	pr_info("DMA buffer allocated at virt=%p, phys=%pad, size=%zu\n",
 		priv->dma_buf_virt, &priv->dma_buf_phys, priv->dma_buf_size);
