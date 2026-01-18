@@ -4,8 +4,22 @@ KDIR ?= /lib/modules/$(shell uname -r)/build
 
 obj-m := luxyd-fpga-pci.o
 
-all:
+all: kernel app
+
+clean: clean_kernel clean_app
+
+kernel:
+	@echo "Building Linux kernel module..."
 	$(MAKE) -C $(KDIR) M=$(PWD)
 
-clean:
+clean_kernel:
+	@echo "Cleaning Linux kernel module..."
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
+
+app:
+	@echo "Building test application..."
+	gcc -Wall -static luxyd-app.c -o luxyd-app
+
+clean_app:
+	@echo "Cleaning test application..."
+	rm -rf luxyd-app
