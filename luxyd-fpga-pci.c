@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2025, Luxyd Technologies
+ * Copyright (c) 2026, Luxyd Technologies
  */
 
 #define pr_fmt(fmt)	KBUILD_MODNAME ": %s: " fmt, __func__
@@ -9,6 +9,8 @@
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+
+#include "luxyd-ioctl.h"
 
 #define DEVICE_NAME	"luxyd_fpga"
 #define DRIVER_NAME	"luxyd-fpga-pci"
@@ -27,9 +29,30 @@ struct fpga_device {
 	void *dma_buf_virt;
 	dma_addr_t dma_buf_phys;
 	size_t dma_buf_size;
+
+	matrix_config config;
+	bool config_set;
+	size_t write_pos;
 };
 
-static int
+static __maybe_unused void
+do_matrix_multiplication(u8 *a, u8 *b, u32 *c, size_t m, size_t n, size_t p)
+{
+	size_t i, j, k;
+
+	for (i = 0; i < m; i++) {
+		for (j = 0; j < p; j++) {
+			c[i * p + j] = 0;
+			for (k = 0; k < n; k++) {
+				c[i * p + j] += a[i * n + k] * b[k * p + j];
+			}
+		}
+	}
+
+	pr_info("completed\n");
+}
+
+static __maybe_unused int
 fpga_do_dma(struct fpga_device *priv, void *data, size_t len, int dir)
 {
 	if (len > priv->dma_buf_size)
@@ -54,6 +77,9 @@ fpga_open(struct inode *inode, struct file *file)
 	priv = container_of(inode->i_cdev, struct fpga_device, cdev);
 	file->private_data = priv;
 
+	priv->write_pos = 0;
+	priv->config_set = false;
+
 	pr_info("device opened\n");
 	return 0;
 }
@@ -69,8 +95,15 @@ static ssize_t
 fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
 	struct fpga_device *priv = file->private_data;
-	void *kbuf;
-	int ret;
+	size_t size_a, size_b;
+
+	if (!priv->config_set) {
+		pr_err("attempt to read before config\n");
+		return -EINVAL;
+	}
+
+	size_a = priv->config.m * priv->config.n;
+	size_b = priv->config.n * priv->config.p;
 
 	if (count > priv->dma_buf_size) {
 		dev_err(&priv->pdev->dev, "read size %zu exceeds limit %ld\n",
@@ -78,64 +111,79 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 		return -EINVAL;
 	}
 
-	kbuf = kzalloc(count, GFP_KERNEL);
-	if (!kbuf) {
-		dev_err(&priv->pdev->dev, "failed to allocate buffer for read\n");
-		return -ENOMEM;
-	}
-
-	ret = fpga_do_dma(priv, kbuf, count, DMA_FROM_DEVICE);
-	if (ret < 0)
-		goto out;
-
-	if (copy_to_user(buf, kbuf, count)) {
+	if (copy_to_user(buf, priv->dma_buf_virt + size_a + size_b, count)) {
 		dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
-		ret = -EFAULT;
+		return -EFAULT;
 	}
 
-out:
-	kfree(kbuf);
-
-	pr_info("device read\n");
-	return ret;
+	pr_info("device read completed\n");
+	return count;
 }
 
 static ssize_t
 fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
 	struct fpga_device *priv = file->private_data;
-	void *kbuf;
-	int ret;
+	size_t size_a, size_b;
+	size_t size_expected;
 
-	if (count > DMA_SIZE_MAX) {
+	if (!priv->config_set) {
+		pr_err("attempt to write before config\n");
+		return -EINVAL;
+	}
+
+	size_a = priv->config.m * priv->config.n;
+	size_b = priv->config.n * priv->config.p;
+	size_expected = size_a + size_b;
+
+	if (priv->write_pos + count > priv->dma_buf_size) {
 		dev_err(&priv->pdev->dev, "write size %zu exceeds limit %ld\n",
 			count, priv->dma_buf_size);
 		return -EINVAL;
 	}
 
-	kbuf = kmalloc(count, GFP_KERNEL);
-	if (!kbuf) {
-		dev_err(&priv->pdev->dev, "failed to allocate buffer for write\n");
-		return -ENOMEM;
-	}
-
-	if (copy_from_user(kbuf, buf, count)) {
+	if (copy_from_user(priv->dma_buf_virt + priv->write_pos, buf, count)) {
 		dev_err(&priv->pdev->dev, "failed to copy_from_user in write\n");
-		kfree(kbuf);
 		return -EFAULT;
 	}
 
-	ret = fpga_do_dma(priv, kbuf, count, DMA_TO_DEVICE);
-	kfree(kbuf);
+	priv->write_pos += count;
 
-	pr_info("device write\n");
-	return ret;
+	if (priv->write_pos >= size_expected) {
+		do_matrix_multiplication(priv->dma_buf_virt,
+					 priv->dma_buf_virt + size_a,
+					 priv->dma_buf_virt + size_a + size_b,
+					 priv->config.m, priv->config.n,
+					 priv->config.p);
+
+		priv->write_pos = 0;
+	}
+
+	pr_info("device write completed\n");
+	return count;
 }
 
 static long
 fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	pr_info("device ioctl\n");
+	struct fpga_device *priv = file->private_data;
+	void __user *argp = (void __user *)arg;
+
+	switch (cmd) {
+	case LUXYD_IOCTL_MATMUL:
+		if (copy_from_user(&priv->config, argp, sizeof(matrix_config)))
+			return -EFAULT;
+
+		priv->write_pos = 0;
+		priv->config_set = true;
+
+		break;
+
+	default:
+		return -EINVAL;
+	}
+
+	pr_info("device ioctl completed\n");
 	return 0;
 }
 
