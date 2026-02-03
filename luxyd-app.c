@@ -1,15 +1,17 @@
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
-#include <linux/types.h>
+#include "luxyd-ioctl.h"
 
 #define DEVICE_PATH	"/dev/luxyd_fpga"
-#define BUFFER_SIZE	(4 * 1024 * 1024)
+#define MEM_ALIGNMENT	4096
 
 void print_hex_dump(const char *prefix, const void *buf, size_t len)
 {
@@ -38,88 +40,211 @@ void print_hex_dump(const char *prefix, const void *buf, size_t len)
 	}
 }
 
+void print_matrix_u8(const char *name, size_t rows, size_t cols, __u8 *matrix) {
+	printf("--- %s (%zu x %zu) ---\n", name, rows, cols);
+
+	for (size_t i = 0; i < rows; i++) {
+		for (size_t j = 0; j < cols; j++) {
+			printf("%3u ", matrix[i * cols + j]);
+		}
+		printf("\n");
+	}
+	printf("\n");
+}
+
+void print_matrix_u32(const char *name, size_t rows, size_t cols, __u32 *matrix) {
+	printf("--- %s (%zu x %zu) ---\n", name, rows, cols);
+
+	for (size_t i = 0; i < rows; i++) {
+		for (size_t j = 0; j < cols; j++) {
+			printf("%7u ", matrix[i * cols + j]);
+		}
+		printf("\n");
+	}
+	printf("\n");
+}
+
+__u8 *allocate_matrix_u8(size_t rows, size_t cols) {
+	void *ptr = NULL;
+	size_t size = rows * cols * sizeof(__u8);
+
+	posix_memalign(&ptr, MEM_ALIGNMENT, size);
+	memset(ptr, 0, size);
+
+	return (__u8 *)ptr;
+}
+
+__u32 *allocate_matrix_u32(size_t rows, size_t cols) {
+	void *ptr = NULL;
+	size_t size = rows * cols * sizeof(__u32);
+
+	posix_memalign(&ptr, MEM_ALIGNMENT, size);
+	memset(ptr, 0, size);
+
+	return (__u32 *)ptr;
+}
+
+void do_matmul(__u8 *a, __u8 *b, __u32 *c, size_t m, size_t n, size_t p) {
+	size_t i, j, k;
+
+	for (i = 0; i < m; i++) {
+		for (j = 0; j < p; j++) {
+			c[i * p + j] = 0;
+			for (k = 0; k < n; k++) {
+				c[i * p + j] += a[i * n + k] * b[k * p + j];
+			}
+		}
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	int ret = EXIT_FAILURE;
-	__u32 *data_out;
-	__u32 *data_in;
-	size_t count;
-	int fd;
 
 	printf("%s start\n", argv[0]);
 
-	/* Allocate memory */
-	data_out = malloc(BUFFER_SIZE);
-	data_in = malloc(BUFFER_SIZE);
-	if (!data_out || !data_in) {
-		perror("failed to allocate memory\n");
-		goto cleanup;
-	}
-
-	memset(data_out, 0, BUFFER_SIZE);
-	memset(data_in, 0, BUFFER_SIZE);
-
-	srand(time(NULL));
-	for (count = 0; count < BUFFER_SIZE/sizeof(data_in); count++)
-		data_in[count] = (__u32)rand();
+	srand((__u32)time(NULL));
 
 	/* Opening device */
-	fd = open(DEVICE_PATH, O_RDWR);
+	int fd = open(DEVICE_PATH, O_RDWR);
 	if (fd < 0) {
 		fprintf(stderr, "failed to open %s\n", DEVICE_PATH);
 		goto cleanup;
 	}
 
-	/* Send data */
-	printf("Sending %u bytes of data...\n", BUFFER_SIZE);
-	ret = write(fd, data_in, BUFFER_SIZE);
+	/* Generate random dimension between 4 and 32 */
+	size_t m = (rand() % 29) + 4;
+	size_t n = (rand() % 29) + 4;
+	size_t p = (rand() % 29) + 4;
+
+	/* Allocate memory */
+	__u8 *A = allocate_matrix_u8(m, n);
+	__u8 *B = allocate_matrix_u8(n, p);
+	__u32 *P = allocate_matrix_u32(m, p);
+	__u32 *P_cpu = allocate_matrix_u32(m, p);
+
+	size_t sizeA = m * n * sizeof(__u8);
+	size_t sizeB = n * p * sizeof(__u8);
+	size_t sizeP = m * p * sizeof(__u32);
+
+	if (!A || !B || !P) {
+		perror("failed to allocate memory\n");
+		goto cleanup;
+	}
+
+	for (size_t i = 0; i < m * n; i++)
+		A[i] = rand() % 256;
+
+	for (size_t i = 0; i < n * p; i++)
+		B[i] = rand() % 256;
+
+	/* Send matrix config */
+	matrix_config config = {
+		.m = m,
+		.n = n,
+		.p = p
+	};
+
+	printf("Sending matrix configuration...\n");
+	ret = ioctl(fd, LUXYD_IOCTL_MATMUL, &config);
+	if (ret < 0) {
+		perror("failed to send ioctl LUXYD_IOCTL_MATMUL\n");
+		goto cleanup;
+	}
+
+	printf("matrix configuration sent\n");
+
+	/* Send matrix A */
+	printf("Sending matrix A (%lu bytes)...\n", sizeA);
+	ret = write(fd, A, sizeA);
 	if (ret < 0) {
 		perror("failed to write data\n");
 		goto cleanup;
 	}
 
-	if (ret != BUFFER_SIZE) {
-		fprintf(stderr, "incomplete: wrote %d of %u bytes\n",
-			ret, BUFFER_SIZE);
+	if (ret != sizeA) {
+		fprintf(stderr, "incomplete: wrote %d of %lu bytes\n",
+			ret, sizeA);
+		ret = -EIO;
 		goto cleanup;
 	}
 
-	printf("%u bytes of data sent\n", BUFFER_SIZE);
+	printf("%u bytes of data sent\n", ret);
 
-	/* Read data */
-	printf("Receiving %u bytes of data...\n", BUFFER_SIZE);
-	ret = read(fd, data_out, BUFFER_SIZE);
+	/* Send matrix B */
+	printf("Sending matrix B (%lu bytes)...\n", sizeB);
+	ret = write(fd, B, sizeB);
+	if (ret < 0) {
+		perror("failed to write data\n");
+		goto cleanup;
+	}
+
+	if (ret != sizeB) {
+		fprintf(stderr, "incomplete: wrote %d of %lu bytes\n",
+			ret, sizeB);
+		ret = -EIO;
+                goto cleanup;
+        }
+
+        printf("%u bytes of data sent\n", ret);
+
+	/* Read result */
+	printf("Receiving matrix P (%lu bytes)...\n", sizeP);
+	ret = read(fd, P, sizeP);
 	if (ret < 0) {
 		perror("failed to read data\n");
 		goto cleanup;
 	}
 
-	if (ret != BUFFER_SIZE) {
-		fprintf(stderr, "incomplete: read %d of %u bytes\n",
-			ret, BUFFER_SIZE);
+	if (ret != sizeP) {
+		fprintf(stderr, "incomplete: read %d of %lu bytes\n",
+			ret, sizeP);
+		ret = -EIO;
 		goto cleanup;
 	}
 
-	printf("%u bytes of data received\n", BUFFER_SIZE);
+	printf("%u bytes of data received\n", ret);
 
-	/* Compare data */
-	if (!memcmp(data_in, data_out, BUFFER_SIZE))
-		printf("data are identical\n");
-	else
-		perror("data are not identical\n");
+	/* Compare result */
+	int mismatch = 0;
 
-	/* Show data, a bit */
-	print_hex_dump("data_in : ", data_in, 16);
-	print_hex_dump("data_out: ", data_out, 16);
+	do_matmul(A, B, P_cpu, m, n, p);
+
+	for (size_t i = 0; i < m * p; i++) {
+		if (P[i] != P_cpu[i]) {
+			mismatch = 1;
+			break;
+		}
+	}
+
+	/* Display them */
+	print_matrix_u8("Matrix A", m, n, A);
+	print_matrix_u8("Matrix B", n, p, B);
+	print_matrix_u32("Matrix P", m, p, P);
+	print_matrix_u32("Matrix P_cpu", m, p, P_cpu);
+
+	if (mismatch) {
+                printf("Verification failed: FPGA and CPU results do not matched\n");
+                ret = EXIT_FAILURE;
+                goto cleanup;
+        } else {
+		printf("Verification success: FPGA and CPU results matched\n");
+	}
 
 	ret = EXIT_SUCCESS;
 
 cleanup:
-	if (data_out)
-		free(data_out);
+	if (A)
+		free(A);
 
-	if (data_in)
-		free(data_in);
+	if (B)
+		free(B);
+
+	if (P)
+		free(P);
+
+	if (P_cpu)
+		free(P_cpu);
 
 	if (fd)
 		close(fd);
