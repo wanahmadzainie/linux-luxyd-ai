@@ -52,6 +52,19 @@ void print_matrix_u8(const char *name, size_t rows, size_t cols, __u8 *matrix) {
 	printf("\n");
 }
 
+void print_matrix_u16(const char *name, size_t rows, size_t cols, __u16 *matrix) {
+	printf("--- %s (%zu x %zu) ---\n", name, rows, cols);
+
+	for (size_t i = 0; i < rows; i++) {
+		for (size_t j = 0; j < cols; j++) {
+			printf("%5u ", matrix[i * cols + j]);
+		}
+		printf("\n");
+	}
+	printf("\n");
+}
+
+
 void print_matrix_u32(const char *name, size_t rows, size_t cols, __u32 *matrix) {
 	printf("--- %s (%zu x %zu) ---\n", name, rows, cols);
 
@@ -74,6 +87,17 @@ __u8 *allocate_matrix_u8(size_t rows, size_t cols) {
 	return (__u8 *)ptr;
 }
 
+__u16 *allocate_matrix_u16(size_t rows, size_t cols) {
+	void *ptr = NULL;
+	size_t size = rows * cols * sizeof(__u16);
+
+	posix_memalign(&ptr, MEM_ALIGNMENT, size);
+	memset(ptr, 0, size);
+
+	return (__u16 *)ptr;
+}
+
+
 __u32 *allocate_matrix_u32(size_t rows, size_t cols) {
 	void *ptr = NULL;
 	size_t size = rows * cols * sizeof(__u32);
@@ -84,7 +108,20 @@ __u32 *allocate_matrix_u32(size_t rows, size_t cols) {
 	return (__u32 *)ptr;
 }
 
-void do_matmul(__u8 *a, __u8 *b, __u32 *c, size_t m, size_t n, size_t p) {
+void do_matmul_u8(__u8 *a, __u8 *b, __u32 *c, size_t m, size_t n, size_t p) {
+	size_t i, j, k;
+
+	for (i = 0; i < m; i++) {
+		for (j = 0; j < p; j++) {
+			c[i * p + j] = 0;
+			for (k = 0; k < n; k++) {
+				c[i * p + j] += a[i * n + k] * b[k * p + j];
+			}
+		}
+	}
+}
+
+void do_matmul_u16(__u16 *a, __u16 *b, __u32 *c, size_t m, size_t n, size_t p) {
 	size_t i, j, k;
 
 	for (i = 0; i < m; i++) {
@@ -109,22 +146,22 @@ int main(int argc, char *argv[])
 	int fd = open(DEVICE_PATH, O_RDWR);
 	if (fd < 0) {
 		fprintf(stderr, "failed to open %s\n", DEVICE_PATH);
-		goto cleanup;
+		return fd;
 	}
 
 	/* Generate random dimension between 4 and 32 */
-	size_t m = (rand() % 29) + 4;
-	size_t n = (rand() % 29) + 4;
-	size_t p = (rand() % 29) + 4;
+	size_t m = (rand() % 13) + 4;
+	size_t n = (rand() % 13) + 4;
+	size_t p = (rand() % 13) + 4;
 
 	/* Allocate memory */
-	__u8 *A = allocate_matrix_u8(m, n);
-	__u8 *B = allocate_matrix_u8(n, p);
+	__u16 *A = allocate_matrix_u16(m, n);
+	__u16 *B = allocate_matrix_u16(n, p);
 	__u32 *P = allocate_matrix_u32(m, p);
 	__u32 *P_cpu = allocate_matrix_u32(m, p);
 
-	size_t sizeA = m * n * sizeof(__u8);
-	size_t sizeB = n * p * sizeof(__u8);
+	size_t sizeA = m * n * sizeof(__u16);
+	size_t sizeB = n * p * sizeof(__u16);
 	size_t sizeP = m * p * sizeof(__u32);
 
 	if (!A || !B || !P) {
@@ -208,7 +245,7 @@ int main(int argc, char *argv[])
 	/* Compare result */
 	int mismatch = 0;
 
-	do_matmul(A, B, P_cpu, m, n, p);
+	do_matmul_u16(A, B, P_cpu, m, n, p);
 
 	for (size_t i = 0; i < m * p; i++) {
 		if (P[i] != P_cpu[i]) {
@@ -218,10 +255,10 @@ int main(int argc, char *argv[])
 	}
 
 	/* Display them */
-	print_matrix_u8("Matrix A", m, n, A);
-	print_matrix_u8("Matrix B", n, p, B);
-	print_matrix_u32("Matrix P", m, p, P);
-	print_matrix_u32("Matrix P_cpu", m, p, P_cpu);
+	//print_matrix_u16("Matrix A", m, n, A);
+	//print_matrix_u16("Matrix B", n, p, B);
+	//print_matrix_u32("Matrix P", m, p, P);
+	//print_matrix_u32("Matrix P_cpu", m, p, P_cpu);
 
 	if (mismatch) {
                 printf("Verification failed: FPGA and CPU results do not matched\n");
