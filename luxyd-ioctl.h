@@ -18,5 +18,6 @@ typedef struct {
 
 /* IOCTL command */
 #define LUXYD_IOCTL_MATMUL	_IOWR('L', 1, matrix_config *)
+#define LUXYD_IOCTL_GEMV	_IO  ('L', 2)
 
 #endif /* _UAPI_LINUX_LUXYD_IOCTL_H */

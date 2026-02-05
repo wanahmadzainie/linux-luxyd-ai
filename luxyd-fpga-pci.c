@@ -18,9 +18,37 @@
 
 #define DEVICE_NAME	"luxyd_fpga"
 #define DRIVER_NAME	"luxyd-fpga-pci"
-#define DRIVER_VERSION	"0.1"
+#define DRIVER_VERSION	"0.2"
 
 /* Luxyd FPGA Status Control Register */
+#define PCIE_BAR0_BASE_ADDR		0x000c0000
+#define PCIE_GGML_CTRL			(PCIE_BAR0_BASE_ADDR + 0x00)
+#define PCIE_GGML_STATUS		(PCIE_BAR0_BASE_ADDR + 0x00)
+#define PCIE_GGML_INIT_LUT_LOW		(PCIE_BAR0_BASE_ADDR + 0x08)
+#define PCIE_GGML_INIT_LUT_HIGH		(PCIE_BAR0_BASE_ADDR + 0x0C)
+#define PCIE_GGML_PROC_LUT_LOW		(PCIE_BAR0_BASE_ADDR + 0x10)
+#define PCIE_GGML_PROC_LUT_HIGH		(PCIE_BAR0_BASE_ADDR + 0x14)
+#define PCIE_GGML_PROC_S_LOW		(PCIE_BAR0_BASE_ADDR + 0x18)
+#define PCIE_GGML_PROC_S_HIGH		(PCIE_BAR0_BASE_ADDR + 0x1C)
+#define PCIE_GGML_PROC_VX_LOW		(PCIE_BAR0_BASE_ADDR + 0x20)
+#define PCIE_GGML_PROC_VX_HIGH		(PCIE_BAR0_BASE_ADDR + 0x24)
+#define PCIE_GGML_PROC_VY_LOW		(PCIE_BAR0_BASE_ADDR + 0x28)
+#define PCIE_GGML_PROC_VY_HIGH		(PCIE_BAR0_BASE_ADDR + 0x2c)
+#define PCIE_GGML_PROC_n		(PCIE_BAR0_BASE_ADDR + 0x30)
+#define PCIE_GGML1_bs_LOW		(PCIE_BAR0_BASE_ADDR + 0x34)
+#define PCIE_GGML1_bs_HIGH		(PCIE_BAR0_BASE_ADDR + 0x38)
+#define PCIE_GGML1_nr			(PCIE_BAR0_BASE_ADDR + 0x3C)
+#define PCIE_GGML1_nc			(PCIE_BAR0_BASE_ADDR + 0x40)
+
+#define CMD_GGML_INIT			BIT(8)
+#define CMD_GGML_PROC			BIT(9)
+
+#define STS_DDR_INIT			BIT(8)
+#define STS_FPGA_READY			BIT(9)
+#define STS_FPGA_TIMEOUT		BIT(10)
+#define STS_GGML_INIT			BIT(11)
+#define STS_GGML_PROC			BIT(12)
+
 #define LUXYD_FPGA_CMD_OFFSET		0xc0000
 #define LUXYD_FPGA_CMD_START		BIT(8)
 
@@ -147,6 +175,63 @@ do_matrix_multiplication(u8 *a, u8 *b, u32 *c, size_t m, size_t n, size_t p)
 	}
 
 	pr_info("completed\n");
+}
+
+static __maybe_unused void
+fpga_dump_regs(struct fpga_device *priv)
+{
+	u32 val;
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_CTRL);
+	pr_info("REG_READ(PCIE_GGML_CTRL)          0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_STATUS);
+	pr_info("REG_READ(PCIE_GGML_STATUS)        0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_INIT_LUT_LOW);
+	pr_info("REG_READ(PCIE_GGML_INIT_LUT_LOW)  0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_INIT_LUT_HIGH);
+	pr_info("REG_READ(PCIE_GGML_INIT_LUT_HIGH) 0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_LUT_LOW);
+	pr_info("REG_READ(PCIE_GGML_PROC_LUT_LOW)  0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_LUT_HIGH);
+	pr_info("REG_READ(PCIE_GGML_PROC_LUT_HIGH) 0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_S_LOW);
+	pr_info("REG_READ(PCIE_GGML_PROC_S_LOW)    0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_S_HIGH);
+	pr_info("REG_READ(PCIE_GGML_PROC_S_HIGH)   0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_VX_LOW);
+	pr_info("REG_READ(PCIE_GGML_PROC_VX_LOW)   0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_VX_HIGH);
+	pr_info("REG_READ(PCIE_GGML_PROC_VX_HIGH)  0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_VY_LOW);
+	pr_info("REG_READ(PCIE_GGML_PROC_VY_LOW)   0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_VY_HIGH);
+	pr_info("REG_READ(PCIE_GGML_PROC_VY_HIGH)  0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_n);
+	pr_info("REG_READ(PCIE_GGML_PROC_n)        0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML1_bs_LOW);
+	pr_info("REG_READ(PCIE_GGML1_bs_LOW)       0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML1_bs_HIGH);
+	pr_info("REG_READ(PCIE_GGML1_bs_HIGH)      0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML1_nr);
+	pr_info("REG_READ(PCIE_GGML1_nr)           0x%08x\n", val);
+
+	val = ioread32(priv->bar0_virt_addr + PCIE_GGML1_nc);
+	pr_info("REG_READ(PCIE_GGML1_nc)           0x%08x\n", val);
 }
 
 static __maybe_unused int
@@ -336,7 +421,6 @@ fpga_do_matrix_multiplication(struct fpga_device *priv)
 	return 0;
 }
 
-
 static int
 fpga_open(struct inode *inode, struct file *file)
 {
@@ -485,6 +569,31 @@ fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		pr_info("REG_READ(INFO_REG) 0x%08x\n", val);
 		break;
 
+	case LUXYD_IOCTL_GEMV:
+		fpga_dump_regs(priv);
+
+		/* set ggml_init lut address 31-0 */
+		val = 0x80000000;
+		iowrite32(val, priv->bar0_virt_addr + PCIE_GGML_INIT_LUT_LOW);
+		pr_info("REG_WRITE(PCIE_GGML_INIT_LUT_LOW)  0x%08x\n", val);
+
+		/* set ggml_init lut address 63-0 */
+		val = 0x0;
+		iowrite32(val, priv->bar0_virt_addr + PCIE_GGML_INIT_LUT_HIGH);
+		pr_info("REG_WRITE(PCIE_GGML_INIT_LUT_HIGH) 0x%08x\n", val);
+
+		/* set ggml_init start */
+		val = CMD_GGML_INIT | CMD_SIGNATURE;
+		iowrite32(val, priv->bar0_virt_addr + PCIE_GGML_CTRL);
+		pr_info("REG_WRITE(PCIE_GGML_CTRL)          0x%08x\n", val);
+
+		udelay(100);
+
+		/* get ggml_init ready */
+		val = ioread32(priv->bar0_virt_addr + PCIE_GGML_STATUS);
+		pr_info("REG_READ(PCIE_GGML_STATUS)         0x%08x\n", val);
+		break;
+
 	default:
 		return -EINVAL;
 	}
@@ -551,15 +660,6 @@ fpga_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		pci_resource_len(pdev, 0));
 	pr_info("BAR1 mapped to %p, length 0x%llx\n", priv->bar1_virt_addr,
 		pci_resource_len(pdev, 1));
-
-	/* Read status control registers */
-	u32 val;
-	val = ioread32(priv->bar0_virt_addr + LUXYD_FPGA_CMD_OFFSET);
-	pr_info("REG_READ(CMD_REG)    0x%08x\n", val);
-	val = ioread32(priv->bar0_virt_addr + LUXYD_FPGA_INFO_OFFSET);
-	pr_info("REG_READ(INFO_REG)   0x%08x\n", val);
-	val = ioread32(priv->bar0_virt_addr + LUXYD_FPGA_STATUS_OFFSET);
-	pr_info("REG_READ(STATUS_REG) 0x%08x\n", val);
 
 	/* Enable DMA */
 	ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
