@@ -21,9 +21,9 @@
 #define DRIVER_VERSION	"0.2"
 
 /* Luxyd FPGA Status Control Register */
-#define PCIE_BAR0_BASE_ADDR		0x000c0000
+#define PCIE_BAR0_BASE_ADDR		0x0
 #define PCIE_GGML_CTRL			(PCIE_BAR0_BASE_ADDR + 0x00)
-#define PCIE_GGML_STATUS		(PCIE_BAR0_BASE_ADDR + 0x00)
+#define PCIE_GGML_STATUS		(PCIE_BAR0_BASE_ADDR + 0x04)
 #define PCIE_GGML_INIT_LUT_LOW		(PCIE_BAR0_BASE_ADDR + 0x08)
 #define PCIE_GGML_INIT_LUT_HIGH		(PCIE_BAR0_BASE_ADDR + 0x0C)
 #define PCIE_GGML_PROC_LUT_LOW		(PCIE_BAR0_BASE_ADDR + 0x10)
@@ -34,11 +34,11 @@
 #define PCIE_GGML_PROC_VX_HIGH		(PCIE_BAR0_BASE_ADDR + 0x24)
 #define PCIE_GGML_PROC_VY_LOW		(PCIE_BAR0_BASE_ADDR + 0x28)
 #define PCIE_GGML_PROC_VY_HIGH		(PCIE_BAR0_BASE_ADDR + 0x2c)
-#define PCIE_GGML_PROC_n		(PCIE_BAR0_BASE_ADDR + 0x30)
-#define PCIE_GGML1_bs_LOW		(PCIE_BAR0_BASE_ADDR + 0x34)
-#define PCIE_GGML1_bs_HIGH		(PCIE_BAR0_BASE_ADDR + 0x38)
-#define PCIE_GGML1_nr			(PCIE_BAR0_BASE_ADDR + 0x3C)
-#define PCIE_GGML1_nc			(PCIE_BAR0_BASE_ADDR + 0x40)
+#define PCIE_GGML_PROC_N		(PCIE_BAR0_BASE_ADDR + 0x30)
+#define PCIE_GGML_BS_LOW		(PCIE_BAR0_BASE_ADDR + 0x34)
+#define PCIE_GGML_BS_HIGH		(PCIE_BAR0_BASE_ADDR + 0x38)
+#define PCIE_GGML_NR			(PCIE_BAR0_BASE_ADDR + 0x3C)
+#define PCIE_GGML_NC			(PCIE_BAR0_BASE_ADDR + 0x40)
 
 #define CMD_GGML_INIT			BIT(8)
 #define CMD_GGML_PROC			BIT(9)
@@ -70,6 +70,16 @@
 #define MAT_A_OFFSET			0x0000
 #define MAT_B_OFFSET			0x2000
 #define MAT_P_OFFSET			0x4000
+
+/* Luxyd FPGA GGML GEMV data offset and location */
+#define S_DATA_OFFSET			0x0
+#define VX_DATA_OFFSET			0x04000000
+#define VY_DATA_OFFSET			0x04100000
+#define GGML_DDR_BASE_ADDR		0x80000000
+#define GGML_DDR_LUT_ADDR		(GGML_DDR_BASE_ADDR + 0x00000000)
+#define GGML_DDR_S_DATA_ADDR		(GGML_DDR_BASE_ADDR + 0x04000000)
+#define GGML_DDR_VX_DATA_ADDR		(GGML_DDR_BASE_ADDR + 0x08000000)
+#define GGML_DDR_VY_DATA_ADDR		(GGML_DDR_BASE_ADDR + 0x09000000)
 
 /* Borrowed from drivers/dma/xilinx/xdma-regs.h */
 /* descriptor definitions */
@@ -158,7 +168,153 @@ struct fpga_device {
 	matrix_config config;
 	bool config_set;
 	size_t write_pos;
+
+	/* ggml gemv */
+	gemv_config gconfig;
+	bool gconfig_set;
+
+	size_t vx_data_size;
+	size_t vy_data_size;
+	size_t output_data_count;
+
+	block_q4_Kx8_kernel *vx_data;
+	block_q8_K_kernel *vy_data;
+	u32 *output_data;
 };
+
+static inline u32 fpga_read32(struct fpga_device *priv, u32 offset)
+{
+	u32 val;
+
+	val = ioread32(priv->bar0_virt_addr + offset);
+	pr_info("READ_REG(0x%08x)  = 0x%08x\n", offset, val);
+
+	return val;
+}
+
+static inline void fpga_write32(struct fpga_device *priv, u32 offset, u32 val)
+{
+	iowrite32(val, priv->bar0_virt_addr + offset);
+	pr_info("WRITE_REG(0x%08x) = 0x%08x\n", offset, val);
+}
+
+static inline int fpga_ready(struct fpga_device *priv)
+{
+	return !!(fpga_read32(priv, PCIE_GGML_STATUS) && STS_FPGA_READY);
+}
+
+static inline int fpga_do_ggml_init(struct fpga_device *priv)
+{
+	int timeout;
+	u32 val;
+
+	pr_info("ggml init start\n");
+
+	/* set ggml_init lut address 31-0 */
+	fpga_write32(priv, PCIE_GGML_INIT_LUT_LOW, lower_32_bits(0x80000000));
+
+	/* set ggml_init lut address 63-0 */
+	fpga_write32(priv, PCIE_GGML_INIT_LUT_HIGH, upper_32_bits(0x0));
+
+	if (fpga_ready(priv))
+		pr_info("FPGA ready to accept command\n");
+	else
+		pr_info("FPGA not ready to accept command\n");
+
+	/* set ggml_init start */
+	val = CMD_GGML_INIT | CMD_SIGNATURE;
+	pr_info("ggml init sending command\n");
+	fpga_write32(priv, PCIE_GGML_CTRL, val);
+
+	/* get ggml_init ready */
+	val = STS_GGML_INIT | STS_FPGA_READY;
+	pr_info("ggml init reading status\n");
+	for (timeout = 100; timeout > 0; timeout--) {
+		if ((fpga_read32(priv, PCIE_GGML_STATUS) & val) == val)
+			break;
+		udelay(100);
+	}
+
+	if (timeout == 0) {
+		pr_info("ggml init not complete\n");
+		return -EBUSY;
+	}
+
+	pr_info("ggml init done\n");
+
+	/* set ggml_proc lut address 31-0 */
+	fpga_write32(priv, PCIE_GGML_PROC_LUT_LOW, GGML_DDR_LUT_ADDR);
+
+	/* set ggml_proc lut address 63-0 */
+	fpga_write32(priv, PCIE_GGML_PROC_LUT_HIGH, 0x0);
+
+	/* set ggml_proc S address 31-0 */
+	fpga_write32(priv, PCIE_GGML_PROC_S_LOW, GGML_DDR_S_DATA_ADDR);
+
+	/* set ggml_proc S address 63-0 */
+	fpga_write32(priv, PCIE_GGML_PROC_S_HIGH, 0x0);
+
+	/* set ggml_proc VX address 31-0 */
+	fpga_write32(priv, PCIE_GGML_PROC_VX_LOW, GGML_DDR_VX_DATA_ADDR);
+
+	/* set ggml_proc VX address 63-0 */
+	fpga_write32(priv, PCIE_GGML_PROC_VX_HIGH, 0x0);
+
+	/* set ggml_proc VY address 31-0 */
+	fpga_write32(priv, PCIE_GGML_PROC_VY_LOW, GGML_DDR_VY_DATA_ADDR);
+
+	/* set ggml_proc VY address 63-0 */
+	fpga_write32(priv, PCIE_GGML_PROC_VY_HIGH, 0x0);
+
+	/* set ggml_proc n */
+	fpga_write32(priv, PCIE_GGML_PROC_N, priv->gconfig.n);
+
+	/* set ggml_proc bs */
+	fpga_write32(priv, PCIE_GGML_BS_LOW, lower_32_bits(priv->gconfig.bs));
+
+	/* set ggml_proc bs */
+	fpga_write32(priv, PCIE_GGML_BS_HIGH, upper_32_bits(priv->gconfig.bs));
+
+	/* set ggml_proc nr */
+	fpga_write32(priv, PCIE_GGML_NR, priv->gconfig.nr);
+
+	/* set ggml_proc nc */
+	fpga_write32(priv, PCIE_GGML_NC, priv->gconfig.nc);
+
+	pr_info("ggml init end\n");
+	return 0;
+}
+
+static inline int fpga_do_ggml_proc(struct fpga_device *priv)
+{
+	int timeout;
+	int val;
+
+	pr_info("ggml proc start\n");
+
+	/* set ggml_proc start */
+	val = CMD_GGML_PROC | CMD_SIGNATURE;
+	pr_info("ggml proc sending command\n");
+	fpga_write32(priv, PCIE_GGML_CTRL, val);
+
+	/* get ggml_proc done */
+	val = STS_GGML_PROC;
+	pr_info("ggml proc reading status\n");
+	for (timeout = 100; timeout > 0; timeout--) {
+                if ((fpga_read32(priv, PCIE_GGML_STATUS) & val) == val)
+                        break;
+                udelay(100);
+        }
+
+        if (timeout == 0) {
+                pr_info("ggml proc not complete\n");
+                return -EBUSY;
+        }
+
+	pr_info("ggml proc done\n");
+	pr_info("ggml proc end\n");
+	return 0;
+}
 
 static __maybe_unused void
 do_matrix_multiplication(u8 *a, u8 *b, u32 *c, size_t m, size_t n, size_t p)
@@ -180,58 +336,27 @@ do_matrix_multiplication(u8 *a, u8 *b, u32 *c, size_t m, size_t n, size_t p)
 static __maybe_unused void
 fpga_dump_regs(struct fpga_device *priv)
 {
-	u32 val;
+	pr_info("ggml registers dump start\n");
 
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_CTRL);
-	pr_info("REG_READ(PCIE_GGML_CTRL)          0x%08x\n", val);
+	fpga_read32(priv, PCIE_GGML_CTRL);
+	fpga_read32(priv, PCIE_GGML_STATUS);
+	fpga_read32(priv, PCIE_GGML_INIT_LUT_LOW);
+	fpga_read32(priv, PCIE_GGML_INIT_LUT_HIGH);
+	fpga_read32(priv, PCIE_GGML_PROC_LUT_LOW);
+	fpga_read32(priv, PCIE_GGML_PROC_LUT_HIGH);
+	fpga_read32(priv, PCIE_GGML_PROC_S_LOW);
+	fpga_read32(priv, PCIE_GGML_PROC_S_HIGH);
+	fpga_read32(priv, PCIE_GGML_PROC_VX_LOW);
+	fpga_read32(priv, PCIE_GGML_PROC_VX_HIGH);
+	fpga_read32(priv, PCIE_GGML_PROC_VY_LOW);
+	fpga_read32(priv, PCIE_GGML_PROC_VY_HIGH);
+	fpga_read32(priv, PCIE_GGML_PROC_N);
+	fpga_read32(priv, PCIE_GGML_BS_LOW);
+	fpga_read32(priv, PCIE_GGML_BS_HIGH);
+	fpga_read32(priv, PCIE_GGML_NR);
+	fpga_read32(priv, PCIE_GGML_NC);
 
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_STATUS);
-	pr_info("REG_READ(PCIE_GGML_STATUS)        0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_INIT_LUT_LOW);
-	pr_info("REG_READ(PCIE_GGML_INIT_LUT_LOW)  0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_INIT_LUT_HIGH);
-	pr_info("REG_READ(PCIE_GGML_INIT_LUT_HIGH) 0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_LUT_LOW);
-	pr_info("REG_READ(PCIE_GGML_PROC_LUT_LOW)  0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_LUT_HIGH);
-	pr_info("REG_READ(PCIE_GGML_PROC_LUT_HIGH) 0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_S_LOW);
-	pr_info("REG_READ(PCIE_GGML_PROC_S_LOW)    0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_S_HIGH);
-	pr_info("REG_READ(PCIE_GGML_PROC_S_HIGH)   0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_VX_LOW);
-	pr_info("REG_READ(PCIE_GGML_PROC_VX_LOW)   0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_VX_HIGH);
-	pr_info("REG_READ(PCIE_GGML_PROC_VX_HIGH)  0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_VY_LOW);
-	pr_info("REG_READ(PCIE_GGML_PROC_VY_LOW)   0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_VY_HIGH);
-	pr_info("REG_READ(PCIE_GGML_PROC_VY_HIGH)  0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML_PROC_n);
-	pr_info("REG_READ(PCIE_GGML_PROC_n)        0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML1_bs_LOW);
-	pr_info("REG_READ(PCIE_GGML1_bs_LOW)       0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML1_bs_HIGH);
-	pr_info("REG_READ(PCIE_GGML1_bs_HIGH)      0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML1_nr);
-	pr_info("REG_READ(PCIE_GGML1_nr)           0x%08x\n", val);
-
-	val = ioread32(priv->bar0_virt_addr + PCIE_GGML1_nc);
-	pr_info("REG_READ(PCIE_GGML1_nc)           0x%08x\n", val);
+	pr_info("ggml registers dump end\n");
 }
 
 static __maybe_unused int
@@ -431,6 +556,7 @@ fpga_open(struct inode *inode, struct file *file)
 
 	priv->write_pos = 0;
 	priv->config_set = false;
+	priv->gconfig_set = false;
 
 	pr_info("device opened\n");
 	return 0;
@@ -450,13 +576,10 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	size_t bytes_to_transfer;
 	size_t size_a, size_b;
 
-	if (!priv->config_set) {
+	if (!priv->config_set && !priv->gconfig_set) {
 		pr_err("attempt to read before config\n");
 		return -EINVAL;
 	}
-
-	size_a = priv->config.m * priv->config.n * sizeof(u16);
-	size_b = priv->config.n * priv->config.p * sizeof(u16);
 
 	if (count > priv->dma_buf_size) {
 		dev_err(&priv->pdev->dev, "read size %zu exceeds limit %ld\n",
@@ -464,16 +587,33 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 		return -EINVAL;
 	}
 
-	/* C2H DMA transfer matrix P */
-	bytes_to_transfer = priv->config.m * priv->config.p * sizeof(u16);
-	fpga_do_dma(priv, bytes_to_transfer,
-		    MAT_P_OFFSET,
-		    priv->dma_buf_phys + MAT_P_OFFSET,
-		    DMA_DEV_TO_MEM);
+	if (priv->config_set) {
+		size_a = priv->config.m * priv->config.n * sizeof(u16);
+		size_b = priv->config.n * priv->config.p * sizeof(u16);
 
-	if (copy_to_user(buf, priv->dma_buf_virt + MAT_P_OFFSET, count)) {
-		dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
-		return -EFAULT;
+		/* C2H DMA transfer matrix P */
+		bytes_to_transfer = priv->config.m * priv->config.p * sizeof(u16);
+		fpga_do_dma(priv, bytes_to_transfer,
+			    MAT_P_OFFSET,
+			    priv->dma_buf_phys + MAT_P_OFFSET,
+			    DMA_DEV_TO_MEM);
+
+		if (copy_to_user(buf, priv->dma_buf_virt + MAT_P_OFFSET, count)) {
+			dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
+			return -EFAULT;
+		}
+	} else if (priv->gconfig_set) {
+		/* C2H DMA transfer S */
+		bytes_to_transfer = priv->gconfig.nc * sizeof(u32);
+		fpga_do_dma(priv, bytes_to_transfer,
+			    GGML_DDR_S_DATA_ADDR,
+			    priv->dma_buf_phys + S_DATA_OFFSET,
+			    DMA_DEV_TO_MEM);
+
+		if (copy_to_user(buf, priv->dma_buf_virt + S_DATA_OFFSET, count)) {
+			dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
+			return -EFAULT;
+		}
 	}
 
 	pr_info("device read completed\n");
@@ -488,14 +628,10 @@ fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 	size_t size_a, size_b;
 	size_t size_expected;
 
-	if (!priv->config_set) {
+	if (!priv->config_set && !priv->gconfig_set) {
 		pr_err("attempt to write before config\n");
 		return -EINVAL;
 	}
-
-	size_a = priv->config.m * priv->config.n * sizeof(u16);
-	size_b = priv->config.n * priv->config.p * sizeof(u16);
-	size_expected = size_a + size_b;
 
 	if (priv->write_pos + count > priv->dma_buf_size) {
 		dev_err(&priv->pdev->dev, "write size %zu exceeds limit %ld\n",
@@ -503,37 +639,72 @@ fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 		return -EINVAL;
 	}
 
-	if (copy_from_user(priv->dma_buf_virt + priv->write_pos, buf, count)) {
-		dev_err(&priv->pdev->dev, "failed to copy_from_user in write\n");
-		return -EFAULT;
+	if (priv->config_set) {
+		size_a = priv->config.m * priv->config.n * sizeof(u16);
+		size_b = priv->config.n * priv->config.p * sizeof(u16);
+		size_expected = size_a + size_b;
+
+		if (copy_from_user(priv->dma_buf_virt + priv->write_pos, buf, count)) {
+			dev_err(&priv->pdev->dev, "failed to copy_from_user in write\n");
+			return -EFAULT;
+		}
+
+		if (priv->write_pos >= size_expected) {
+			/* H2C DMA transfer matrix A */
+			bytes_to_transfer = priv->config.m * priv->config.n * sizeof(u16);
+			fpga_do_dma(priv, bytes_to_transfer,
+				    priv->dma_buf_phys + MAT_A_OFFSET,
+				    MAT_A_OFFSET,
+				    DMA_MEM_TO_DEV);
+
+			/* H2C DMA transfer matrix B */
+			bytes_to_transfer = priv->config.n * priv->config.p * sizeof(u16);
+			fpga_do_dma(priv, bytes_to_transfer,
+				    priv->dma_buf_phys + MAT_B_OFFSET,
+				    MAT_B_OFFSET,
+				    DMA_MEM_TO_DEV);
+
+			fpga_do_matrix_multiplication(priv);
+			//do_matrix_multiplication(priv->dma_buf_virt,
+			//			 priv->dma_buf_virt + size_a,
+			//			 priv->dma_buf_virt + size_a + size_b,
+			//			 priv->config.m, priv->config.n,
+			//			 priv->config.p);
+
+			priv->write_pos = 0;
+		}
+
+		priv->write_pos += MAT_B_OFFSET;
+	} else if (priv->gconfig_set) {
+		size_expected = priv->vx_data_size + priv->vy_data_size;
+
+		if (copy_from_user(priv->dma_buf_virt + priv->write_pos, buf, count)) {
+			dev_err(&priv->pdev->dev, "failed to copy_from_user in write\n");
+			return -EFAULT;
+		}
+
+		if (priv->write_pos >= size_expected) {
+			/* H2C DMA transfer VX data */
+			bytes_to_transfer = priv->vx_data_size;
+			fpga_do_dma(priv, bytes_to_transfer,
+				    priv->dma_buf_phys + VX_DATA_OFFSET,
+				    GGML_DDR_VX_DATA_ADDR,
+				    DMA_MEM_TO_DEV);
+
+			/* H2C DMA transfer VY data */
+			bytes_to_transfer = priv->vy_data_size;
+			fpga_do_dma(priv, bytes_to_transfer,
+				    priv->dma_buf_phys + VY_DATA_OFFSET,
+				    GGML_DDR_VY_DATA_ADDR,
+				    DMA_MEM_TO_DEV);
+
+			fpga_do_ggml_proc(priv);
+
+			priv->write_pos = 0;
+		}
+
+		priv->write_pos += VY_DATA_OFFSET;
 	}
-
-	if (priv->write_pos >= size_expected) {
-		/* H2C DMA transfer matrix A */
-		bytes_to_transfer = priv->config.m * priv->config.n * sizeof(u16);
-                fpga_do_dma(priv, bytes_to_transfer,
-                                  priv->dma_buf_phys + MAT_A_OFFSET,
-                                  MAT_A_OFFSET,
-                                  DMA_MEM_TO_DEV);
-
-		/* H2C DMA transfer matrix B */
-		bytes_to_transfer = priv->config.n * priv->config.p * sizeof(u16);
-                fpga_do_dma(priv, bytes_to_transfer,
-                                  priv->dma_buf_phys + MAT_B_OFFSET,
-                                  MAT_B_OFFSET,
-                                  DMA_MEM_TO_DEV);
-
-		fpga_do_matrix_multiplication(priv);
-		//do_matrix_multiplication(priv->dma_buf_virt,
-		//			 priv->dma_buf_virt + size_a,
-		//			 priv->dma_buf_virt + size_a + size_b,
-		//			 priv->config.m, priv->config.n,
-		//			 priv->config.p);
-
-		priv->write_pos = 0;
-	}
-
-	priv->write_pos += MAT_B_OFFSET;
 
 	pr_info("device write completed\n");
 	return count;
@@ -545,6 +716,7 @@ fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct fpga_device *priv = file->private_data;
 	void __user *argp = (void __user *)arg;
 	u32 val;
+	int ret = 0;
 
 	switch (cmd) {
 	case LUXYD_IOCTL_MATMUL:
@@ -570,36 +742,40 @@ fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		break;
 
 	case LUXYD_IOCTL_GEMV:
+		if (copy_from_user(&priv->gconfig, argp, sizeof(gemv_config)))
+			return -EFAULT;
+
+		priv->write_pos = 0;
+		priv->gconfig_set = true;
+
+		/* Calculate vx and vy data sizes */
+		{
+			int const qk = QK_K;
+			int const nb = priv->gconfig.n / qk;
+			int const ncols_interleaved = 8;
+
+			priv->vx_data_size = (size_t)nb * (priv->gconfig.nc / ncols_interleaved) * sizeof(block_q4_Kx8_kernel);
+			priv->vy_data_size = (size_t)nb * sizeof(block_q8_K_kernel);
+		}
+
+		pr_info("Parameters: n=%d bs=%zu nr=%d nc=%d\n",
+			priv->gconfig.n, priv->gconfig.bs, priv->gconfig.nr,
+			priv->gconfig.nc);
+		pr_info("vx_data_size=%zu bytes, vy_data_size=%zu bytes\n",
+			priv->vx_data_size, priv->vy_data_size);
+
 		fpga_dump_regs(priv);
 
-		/* set ggml_init lut address 31-0 */
-		val = 0x80000000;
-		iowrite32(val, priv->bar0_virt_addr + PCIE_GGML_INIT_LUT_LOW);
-		pr_info("REG_WRITE(PCIE_GGML_INIT_LUT_LOW)  0x%08x\n", val);
-
-		/* set ggml_init lut address 63-0 */
-		val = 0x0;
-		iowrite32(val, priv->bar0_virt_addr + PCIE_GGML_INIT_LUT_HIGH);
-		pr_info("REG_WRITE(PCIE_GGML_INIT_LUT_HIGH) 0x%08x\n", val);
-
-		/* set ggml_init start */
-		val = CMD_GGML_INIT | CMD_SIGNATURE;
-		iowrite32(val, priv->bar0_virt_addr + PCIE_GGML_CTRL);
-		pr_info("REG_WRITE(PCIE_GGML_CTRL)          0x%08x\n", val);
-
-		udelay(100);
-
-		/* get ggml_init ready */
-		val = ioread32(priv->bar0_virt_addr + PCIE_GGML_STATUS);
-		pr_info("REG_READ(PCIE_GGML_STATUS)         0x%08x\n", val);
-		break;
+		fpga_do_ggml_init(priv);
+		fpga_dump_regs(priv);
+                break;
 
 	default:
 		return -EINVAL;
 	}
 
 	pr_info("device ioctl completed\n");
-	return 0;
+	return ret;
 }
 
 static const struct file_operations fpga_fops = {
