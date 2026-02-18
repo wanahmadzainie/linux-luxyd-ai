@@ -19,7 +19,9 @@ clean_kernel:
 app:
 	@echo "Building test application..."
 	gcc -Wall -static luxyd-app.c -o luxyd-app
+	gcc -Wall -static gemv-app.c -o gemv-app -lm
 
 clean_app:
 	@echo "Cleaning test application..."
 	rm -rf luxyd-app
+	rm -rf gemv-app
