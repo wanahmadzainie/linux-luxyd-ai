@@ -17,7 +17,7 @@
 #define START_BYTES	2048
 #define STEP_BYTES	512
 
-#define DMA_ADDR_BASE	0x00000000
+#define DMA_ADDR_BASE	0x80000000
 #define DMA_ADDR_OFFSET	0x00000000
 
 void print_hex_dump(const char *prefix, const void *buf, size_t len)
