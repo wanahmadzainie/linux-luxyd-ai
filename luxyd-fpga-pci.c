@@ -180,6 +180,10 @@ struct fpga_device {
 	block_q4_Kx8_kernel *vx_data;
 	block_q8_K_kernel *vy_data;
 	u32 *output_data;
+
+	/* for DMA test */
+	dmatest_config dconfig;
+	bool mode_dma_test;
 };
 
 static inline u32 fpga_read32(struct fpga_device *priv, u32 offset)
@@ -557,6 +561,7 @@ fpga_open(struct inode *inode, struct file *file)
 	priv->write_pos = 0;
 	priv->config_set = false;
 	priv->gconfig_set = false;
+	priv->mode_dma_test = false;
 
 	pr_info("device opened\n");
 	return 0;
@@ -576,7 +581,7 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	size_t bytes_to_transfer;
 	size_t size_a, size_b;
 
-	if (!priv->config_set && !priv->gconfig_set) {
+	if (!priv->config_set && !priv->gconfig_set && !priv->mode_dma_test) {
 		pr_err("attempt to read before config\n");
 		return -EINVAL;
 	}
@@ -614,6 +619,21 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 			dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
 			return -EFAULT;
 		}
+	} else if (priv->mode_dma_test) {
+		/* clear buffer */
+		memset(priv->dma_buf_virt, 0, DMA_SIZE_MAX);
+
+		/* C2H DMA transfer test data */
+		bytes_to_transfer = count;
+		fpga_do_dma(priv, bytes_to_transfer,
+			    priv->dconfig.base + priv->dconfig.offset,
+			    priv->dma_buf_phys + priv->dconfig.offset,
+			    DMA_DEV_TO_MEM);
+
+		if (copy_to_user(buf, priv->dma_buf_virt, count)) {
+			dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
+			return -EFAULT;
+		}
 	}
 
 	pr_info("device read completed\n");
@@ -628,7 +648,7 @@ fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 	size_t size_a, size_b;
 	size_t size_expected;
 
-	if (!priv->config_set && !priv->gconfig_set) {
+	if (!priv->config_set && !priv->gconfig_set && !priv->mode_dma_test) {
 		pr_err("attempt to write before config\n");
 		return -EINVAL;
 	}
@@ -704,6 +724,18 @@ fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 		}
 
 		priv->write_pos += VY_DATA_OFFSET;
+	} else if (priv->mode_dma_test) {
+		if (copy_from_user(priv->dma_buf_virt, buf, count)) {
+			dev_err(&priv->pdev->dev, "failed to copy_from_user in write\n");
+			return -EFAULT;
+		}
+
+		/* H2C DMA transfer test data */
+		bytes_to_transfer = count;
+		fpga_do_dma(priv, bytes_to_transfer,
+			    priv->dma_buf_phys + priv->dconfig.offset,
+			    priv->dconfig.base + priv->dconfig.offset,
+			    DMA_MEM_TO_DEV);
 	}
 
 	pr_info("device write completed\n");
@@ -769,6 +801,15 @@ fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		fpga_do_ggml_init(priv);
 		fpga_dump_regs(priv);
                 break;
+
+	case LUXYD_IOCTL_DMATEST:
+		if (copy_from_user(&priv->dconfig, argp, sizeof(dmatest_config)))
+			return -EFAULT;
+
+		priv->mode_dma_test = true;
+		pr_info("DMA test on base 0x%08x and offset (0x%08x)\n",
+			priv->dconfig.base, priv->dconfig.offset);
+		break;
 
 	default:
 		return -EINVAL;

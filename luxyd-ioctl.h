@@ -40,8 +40,15 @@ typedef struct {
 	int nc;			/* number of cols ? */
 } gemv_config;
 
+/* DMA test config */
+typedef struct {
+	__u32 base;		/* in FPGA */
+	__u32 offset;
+} dmatest_config;
+
 /* IOCTL command */
 #define LUXYD_IOCTL_MATMUL	_IOWR('L', 1, matrix_config *)
 #define LUXYD_IOCTL_GEMV	_IOWR('L', 2, gemv_config *)
+#define LUXYD_IOCTL_DMATEST	_IOWR('L', 3, dmatest_config *)
 
 #endif /* _UAPI_LINUX_LUXYD_IOCTL_H */
