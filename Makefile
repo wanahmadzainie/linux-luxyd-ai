@@ -20,8 +20,10 @@ app:
 	@echo "Building test application..."
 	gcc -Wall -static luxyd-app.c -o luxyd-app
 	gcc -Wall -static gemv-app.c -o gemv-app -lm
+	gcc -Wall -static dma-test.c -o dma-test
 
 clean_app:
 	@echo "Cleaning test application..."
 	rm -rf luxyd-app
 	rm -rf gemv-app
+	rm -rf dma-test
