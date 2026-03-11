@@ -7,10 +7,118 @@
 #include <errno.h>
 #include <math.h>
 #include <stdint.h>
+#include <ctype.h>
+#include <time.h>
 
 #include "luxyd-ioctl.h"
 
 #define DEVICE_PATH	"/dev/luxyd_fpga"
+
+#define GGML_LUT_SIZE	(64 * 1024 * 1024)
+#define GGML_S_SIZE	(64 * 1024 * 1024)
+#define GGML_VX_SIZE	(16 * 1024 * 1024)
+#define GGML_VY_SIZE	(16 * 1024 * 1024)
+#define LUT_OFFSET	0x0
+#define S_DATA_OFFSET	(LUT_OFFSET + GGML_LUT_SIZE)
+#define VX_DATA_OFFSET	(S_DATA_OFFSET + GGML_S_SIZE)
+#define VY_DATA_OFFSET	(VX_DATA_OFFSET + GGML_VX_SIZE)
+
+// Global lookup table for fp16 to fp32 conversion
+float ggml_table_f32_f16[1 << 16];
+
+// Initialize the f16 to f32 lookup table
+void init_ggml_table_f32_f16(void)
+{
+	for (int i = 0; i < (1 << 16); i++) {
+		uint16_t ui = i;
+		uint32_t s = (ui & 0x8000) << 16;	// sign
+		uint32_t e = (ui & 0x7c00) >> 10;	// exponent
+		uint32_t m = (ui & 0x03ff) << 13;	// mantissa
+
+		if (e == 0) {
+			if (m == 0) {
+				// zero
+				ggml_table_f32_f16[i] = *(float *) &s;
+			} else {
+				// denormalized
+				e = 127 - 14;
+				while ((m & 0x00800000) == 0) {
+					m <<= 1;
+					e--;
+				}
+				m &= 0x007fffff;
+				uint32_t result = s | (e << 23) | m;
+				ggml_table_f32_f16[i] = *(float *) &result;
+			}
+		} else if (e == 31) {
+			// infinity or NaN
+			uint32_t result = s | 0x7f800000 | m;
+			ggml_table_f32_f16[i] = *(float *) &result;
+		} else {
+			// normalized
+			e += 127 - 15;
+			uint32_t result = s | (e << 23) | m;
+			ggml_table_f32_f16[i] = *(float *) &result;
+		}
+	}
+}
+
+void print_hex_dump(const char *prefix, const void *buf, size_t len)
+{
+	const unsigned char *p = (const unsigned char *)buf;
+
+	for (size_t i = 0; i < len; i += 16) {
+		printf("%s%08zx: ", prefix, i);
+
+		/* Hex */
+		for (size_t j = 0; j < 16; j++) {
+			if (i + j < len)
+				printf("%02x ", p[i + j]);
+			else
+				printf("   ");
+		}
+
+		printf(" ");
+
+		/* ASCII */
+		for (size_t j = 0; j < 16; j++) {
+			if (i + j < len)
+				printf("%c", isprint(p[i + j]) ? p[i + j] : '.');
+		}
+
+		printf("\n");
+	}
+}
+
+void print_hex_dump2(const char *prefix, const void *buf, size_t len)
+{
+	const unsigned char *p = (const unsigned char *)buf;
+
+	for (size_t i = 0; i < len; i += 16) {
+		printf("%s%08zx: ", prefix, i);
+
+		/* Hex */
+		for (size_t j = 0; j < 16; j++) {
+			if (i + j < len)
+				printf("%02x ", p[i + j]);
+			else
+				printf("   ");
+		}
+
+		printf(" ");
+
+		/* Floats */
+		for (size_t j = 0; j < 16; j += 4) {
+			if (i + j + 3 < len) {
+				float val;
+				memcpy(&val, &p[i + j], sizeof(float));
+				printf("%12.4e ", val);
+			}
+		}
+
+                printf("\n");
+        }
+}
 
 /* Function to read parameters from text file (C-style) */
 static int read_parameters_c(char const *filename, gemv_config *params)
@@ -119,6 +227,9 @@ static int compare_outputs_c(float const *calculated, float const *expected,
 
 	fprintf(stdout, "\nTest Result: %s\n", (passed ? "PASSED" : "FAILED"));
 
+	print_hex_dump2("calculated : ", calculated, 64);
+	print_hex_dump2("expected   : ", expected, 64);
+
 	return passed;
 }
 
@@ -172,6 +283,54 @@ static int app_open_and_setup_device(char const *device_path,
 	return fd;
 }
 
+static int app_transfer_lut(int fd, size_t *lut_data_size_bytes_out, void **lut_data_ptr)
+{
+	/* Generate LUT, locally */
+	init_ggml_table_f32_f16();
+
+	/* Save LUT to files */
+	FILE *table_file = fopen("ggml_table_f32_f16.bin", "wb");
+	if (table_file) {
+		fwrite(ggml_table_f32_f16, sizeof(ggml_table_f32_f16), 1, table_file);
+		fclose(table_file);
+		fprintf(stdout, "ggml_table_f32_f16 saved to ggml_table_f32_f16.bin\n");
+	} else {
+		fprintf(stderr, "Error opening ggml_table_f32_f16.bin for writing");
+	}
+
+	FILE *table_txt_file = fopen("ggml_table_f32_f16.txt", "w");
+	if (table_txt_file) {
+		for (int i = 0; i < (1 << 16); i++) {
+			unsigned char *b = (unsigned char *) &ggml_table_f32_f16[i];
+			fprintf(table_txt_file, "Entry %5d: %02x %02x %02x %02x -> %e\n",
+				i, b[0], b[1], b[2], b[3], ggml_table_f32_f16[i]);
+		}
+		fclose(table_txt_file);
+		fprintf(stdout, "ggml_table_f32_f16 saved to ggml_table_f32_f16.txt\n");
+	} else {
+		fprintf(stderr, "Error opening ggml_table_f32_f16.txt for writing");
+	}
+
+	/* Read LUT from FPGA */
+	size_t lut_data_size_bytes = sizeof(ggml_table_f32_f16);
+	*lut_data_ptr = malloc(lut_data_size_bytes);
+	if (!lut_data_ptr) {
+		fprintf(stderr, "Failed to allocate memory for lut_data\n");
+		return 1;
+	}
+	ssize_t bytes_read = pread(fd, *lut_data_ptr, lut_data_size_bytes, LUT_OFFSET);
+	fprintf(stdout, "Read %zu bytes of lut data from kernel driver.\n", bytes_read);
+	if (!memcmp(ggml_table_f32_f16, *lut_data_ptr, lut_data_size_bytes))
+		fprintf(stdout, "lut data readback OK.\n");
+	else
+		fprintf(stdout, "lut data readback NG (mismatch).\n");
+	print_hex_dump2("lut         : ", ggml_table_f32_f16, 64);
+	print_hex_dump2("lut readback: ", *lut_data_ptr, 64);
+	*lut_data_size_bytes_out = lut_data_size_bytes;
+
+	return 0;
+}
+
 /* Function to transfer vx and vy data to the device using new ioctls */
 static int app_transfer_data(int fd,
 			     size_t vx_data_size_bytes, void **vx_data_ptr,
@@ -204,7 +363,7 @@ static int app_transfer_data(int fd,
 	fprintf(stdout, "vy data read.\n");
 
 	/* --- 3. Write vx data to the device --- */
-	bytes_written = write(fd, *vx_data_ptr, vx_data_size_bytes);
+	bytes_written = pwrite(fd, *vx_data_ptr, vx_data_size_bytes, VX_DATA_OFFSET);
 	if (bytes_written < 0 || (size_t)bytes_written != vx_data_size_bytes) {
 		fprintf(stderr, "Failed to write vx data to device: %s\n",
 			strerror(errno));
@@ -213,13 +372,39 @@ static int app_transfer_data(int fd,
 	fprintf(stdout, "vx data successfully written to kernel driver.\n");
 
 	/* --- 4. Write vy data to the device --- */
-	bytes_written = write(fd, *vy_data_ptr, vy_data_size_bytes);
+	bytes_written = pwrite(fd, *vy_data_ptr, vy_data_size_bytes, VY_DATA_OFFSET);
 	if (bytes_written < 0 || (size_t)bytes_written != vy_data_size_bytes) {
 		fprintf(stderr, "Failed to write vy data to device: %s\n",
 			strerror(errno));
 		return 1;
 	}
 	fprintf(stdout, "vy data successfully written to kernel driver.\n");
+
+	/* --- Readback vx and vy, and compare --- */
+	ssize_t read_bytes;
+	void *readback_buf = malloc(GGML_LUT_SIZE);
+	if (!readback_buf) {
+		fprintf(stderr, "Failed to allocate memory for readback_buf\n");
+		return 1;
+	}
+	memset(readback_buf, 0, GGML_LUT_SIZE);
+	read_bytes = pread(fd, readback_buf, vx_data_size_bytes, VX_DATA_OFFSET);
+	fprintf(stdout, "vx readback %zu bytes (expected %zu bytes).\n", read_bytes, vx_data_size_bytes);
+	if (!memcmp(*vx_data_ptr, readback_buf, vx_data_size_bytes))
+		fprintf(stdout, "vx data readback OK.\n");
+	else
+		fprintf(stdout, "vy data readback NG (mismatch).\n");
+	print_hex_dump("vx         : ", *vx_data_ptr, 64);
+	print_hex_dump("vx readback: ", readback_buf, 64);
+	read_bytes = pread(fd, readback_buf, vy_data_size_bytes, VY_DATA_OFFSET);
+	fprintf(stdout, "vy readback %zu bytes (expected %zu bytes).\n", read_bytes, vy_data_size_bytes);
+	if (!memcmp(*vy_data_ptr, readback_buf, vy_data_size_bytes))
+		fprintf(stdout, "vy data readback OK.\n");
+	else
+		fprintf(stdout, "vy data readback NG (mismatch).\n");
+	print_hex_dump("vy         : ", *vy_data_ptr, 64);
+	print_hex_dump("vy readback: ", readback_buf, 64);
+	free(readback_buf);
 
 	return 0;
 }
@@ -241,10 +426,12 @@ static int app_read_and_process_output(int fd, gemv_config const *params,
 	}
 
 	size_t total_bytes_read = 0;
+
 	while (total_bytes_read < output_size_bytes) {
-		ssize_t bytes_read_now = read(fd, (char *)*raw_output_ptr +
+		ssize_t bytes_read_now = pread(fd, (char *)*raw_output_ptr +
 					      total_bytes_read,
-					      output_size_bytes - total_bytes_read);
+					      output_size_bytes - total_bytes_read,
+					      S_DATA_OFFSET + total_bytes_read);
 		if (bytes_read_now < 0) {
 			fprintf(stderr, "Failed to read output data from device: %s\n",
 				strerror(errno));
@@ -265,6 +452,7 @@ static int app_read_and_process_output(int fd, gemv_config const *params,
 	}
 	fprintf(stdout, "Successfully read %zu bytes of computed output from kernel "
 		"driver.\n", total_bytes_read);
+	print_hex_dump2("S: ", *raw_output_ptr, 64);
 
 	/* Convert raw integer output to float for further processing */
 	int nc_output = output_size_bytes / sizeof(uint32_t);
@@ -292,6 +480,7 @@ int main()
 
 	/* Resource tracking for cleanup */
 	int fd = -1;
+	void *lut_data = NULL;
 	void *vx_data = NULL;
 	void *vy_data = NULL;
 	uint32_t *raw_output = NULL;
@@ -301,6 +490,7 @@ int main()
 	int comparison_passed = 0; /* Default to failed */
 
 	gemv_config params; /* Declare params here to be passed to app_open_and_setup_device */
+	size_t lut_data_size_bytes = 0;
 	size_t vx_data_size_bytes = 0;
 	size_t vy_data_size_bytes = 0;
 
@@ -308,6 +498,10 @@ int main()
 	fd = app_open_and_setup_device(device_path, &params,
 				       &vx_data_size_bytes, &vy_data_size_bytes);
 	if (fd < 0)
+		goto cleanup;
+
+	/* --- Read LUT from FPGA and compare --- */
+	if (app_transfer_lut(fd, &lut_data_size_bytes, &lut_data) != 0)
 		goto cleanup;
 
 	/* --- 2. Transfer data (vx and vy) to the device --- */
@@ -361,6 +555,8 @@ cleanup:
 		free(vy_data);
 	if (vx_data)
 		free(vx_data);
+	if (lut_data)
+		free(lut_data);
 	if (fd != -1)
 		close(fd);
 
