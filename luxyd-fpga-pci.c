@@ -72,14 +72,20 @@
 #define MAT_P_OFFSET			0x4000
 
 /* Luxyd FPGA GGML GEMV data offset and location */
-#define S_DATA_OFFSET			0x0
-#define VX_DATA_OFFSET			0x04000000
-#define VY_DATA_OFFSET			0x04100000
+#define GGML_DDR_SIZE			SZ_512M
+#define GGML_LUT_SIZE			SZ_64M
+#define GGML_S_SIZE			SZ_64M
+#define GGML_VX_SIZE			SZ_16M
+#define GGML_VY_SIZE			SZ_16M
+#define LUT_OFFSET			0x0
+#define S_DATA_OFFSET			(LUT_OFFSET + GGML_LUT_SIZE)
+#define VX_DATA_OFFSET			(S_DATA_OFFSET + GGML_S_SIZE)
+#define VY_DATA_OFFSET			(VX_DATA_OFFSET + GGML_VX_SIZE)
 #define GGML_DDR_BASE_ADDR		0x80000000
-#define GGML_DDR_LUT_ADDR		(GGML_DDR_BASE_ADDR + 0x00000000)
-#define GGML_DDR_S_DATA_ADDR		(GGML_DDR_BASE_ADDR + 0x04000000)
-#define GGML_DDR_VX_DATA_ADDR		(GGML_DDR_BASE_ADDR + 0x08000000)
-#define GGML_DDR_VY_DATA_ADDR		(GGML_DDR_BASE_ADDR + 0x09000000)
+#define GGML_DDR_LUT_ADDR		(GGML_DDR_BASE_ADDR + LUT_OFFSET)
+#define GGML_DDR_S_DATA_ADDR		(GGML_DDR_BASE_ADDR + S_DATA_OFFSET)
+#define GGML_DDR_VX_DATA_ADDR		(GGML_DDR_BASE_ADDR + VX_DATA_OFFSET)
+#define GGML_DDR_VY_DATA_ADDR		(GGML_DDR_BASE_ADDR + VY_DATA_OFFSET)
 
 /* Borrowed from drivers/dma/xilinx/xdma-regs.h */
 /* descriptor definitions */
@@ -302,12 +308,12 @@ static inline int fpga_do_ggml_proc(struct fpga_device *priv)
 	fpga_write32(priv, PCIE_GGML_CTRL, val);
 
 	/* get ggml_proc done */
-	val = STS_GGML_PROC;
+	val = STS_GGML_PROC | STS_FPGA_READY;
 	pr_info("ggml proc reading status\n");
-	for (timeout = 100; timeout > 0; timeout--) {
+	for (timeout = 1000; timeout > 0; timeout--) {
                 if ((fpga_read32(priv, PCIE_GGML_STATUS) & val) == val)
                         break;
-                udelay(100);
+                udelay(1000);
         }
 
         if (timeout == 0) {
@@ -405,13 +411,13 @@ fpga_do_dma(struct fpga_device *priv, size_t len, u64 src_addr, u64 dst_addr,
 		pr_info("H2C: kick off DMA transfer\n");
 
 		/* poll H2C status */
-		for (timeout = 100; timeout > 0; timeout--) {
+		for (timeout = 1000; timeout > 0; timeout--) {
 			val = ioread32(priv->bar1_virt_addr + 0x0040);
 			pr_info("H2C: REG_READ(0x0040) 0x%08x\n", val);
 			if ((val & BIT(0)) == 0x0)
 				break;
 
-			udelay(10);
+			udelay(100);
 		}
 
 		if (timeout == 0)
@@ -463,13 +469,13 @@ fpga_do_dma(struct fpga_device *priv, size_t len, u64 src_addr, u64 dst_addr,
 		pr_info("C2H: kick off DMA transfer\n");
 
 		/* poll C2H status */
-		for (timeout = 100; timeout > 0; timeout--) {
+		for (timeout = 1000; timeout > 0; timeout--) {
 			val = ioread32(priv->bar1_virt_addr + 0x1040);
 			pr_info("C2H: REG_READ(0x1040) 0x%08x\n", val);
 			if ((val & BIT(0)) == 0x0)
 				break;
 
-			udelay(10);
+			udelay(100);
 		}
 
 		if (timeout == 0)
@@ -580,6 +586,7 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	struct fpga_device *priv = file->private_data;
 	size_t bytes_to_transfer;
 	size_t size_a, size_b;
+	loff_t pos = *ppos;
 
 	if (!priv->config_set && !priv->gconfig_set && !priv->mode_dma_test) {
 		pr_err("attempt to read before config\n");
@@ -608,14 +615,20 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 			return -EFAULT;
 		}
 	} else if (priv->gconfig_set) {
-		/* C2H DMA transfer S */
-		bytes_to_transfer = priv->gconfig.nc * sizeof(u32);
+		memset(priv->dma_buf_virt, 0, DMA_SIZE_MAX);
+
+		/* trigger computation when reading S */
+		if (pos == S_DATA_OFFSET)
+			fpga_do_ggml_proc(priv);
+
+		/* C2H DMA transfer */
+		bytes_to_transfer = count;
 		fpga_do_dma(priv, bytes_to_transfer,
-			    GGML_DDR_S_DATA_ADDR,
-			    priv->dma_buf_phys + S_DATA_OFFSET,
+			    GGML_DDR_BASE_ADDR + pos,
+			    priv->dma_buf_phys + pos,
 			    DMA_DEV_TO_MEM);
 
-		if (copy_to_user(buf, priv->dma_buf_virt + S_DATA_OFFSET, count)) {
+		if (copy_to_user(buf, priv->dma_buf_virt + pos, count)) {
 			dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
 			return -EFAULT;
 		}
@@ -630,7 +643,7 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 			    priv->dma_buf_phys + priv->dconfig.offset,
 			    DMA_DEV_TO_MEM);
 
-		if (copy_to_user(buf, priv->dma_buf_virt, count)) {
+		if (copy_to_user(buf, priv->dma_buf_virt + priv->dconfig.offset, count)) {
 			dev_err(&priv->pdev->dev, "failed to copy_to_user in read\n");
 			return -EFAULT;
 		}
@@ -647,6 +660,7 @@ fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 	size_t bytes_to_transfer;
 	size_t size_a, size_b;
 	size_t size_expected;
+	loff_t pos = *ppos;
 
 	if (!priv->config_set && !priv->gconfig_set && !priv->mode_dma_test) {
 		pr_err("attempt to write before config\n");
@@ -696,36 +710,19 @@ fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 
 		priv->write_pos += MAT_B_OFFSET;
 	} else if (priv->gconfig_set) {
-		size_expected = priv->vx_data_size + priv->vy_data_size;
-
-		if (copy_from_user(priv->dma_buf_virt + priv->write_pos, buf, count)) {
+		if (copy_from_user(priv->dma_buf_virt + pos, buf, count)) {
 			dev_err(&priv->pdev->dev, "failed to copy_from_user in write\n");
 			return -EFAULT;
 		}
 
-		if (priv->write_pos >= size_expected) {
-			/* H2C DMA transfer VX data */
-			bytes_to_transfer = priv->vx_data_size;
-			fpga_do_dma(priv, bytes_to_transfer,
-				    priv->dma_buf_phys + VX_DATA_OFFSET,
-				    GGML_DDR_VX_DATA_ADDR,
-				    DMA_MEM_TO_DEV);
-
-			/* H2C DMA transfer VY data */
-			bytes_to_transfer = priv->vy_data_size;
-			fpga_do_dma(priv, bytes_to_transfer,
-				    priv->dma_buf_phys + VY_DATA_OFFSET,
-				    GGML_DDR_VY_DATA_ADDR,
-				    DMA_MEM_TO_DEV);
-
-			fpga_do_ggml_proc(priv);
-
-			priv->write_pos = 0;
-		}
-
-		priv->write_pos += VY_DATA_OFFSET;
+		/* H2C DMA transfer */
+		bytes_to_transfer = count;
+		fpga_do_dma(priv, bytes_to_transfer,
+			    priv->dma_buf_phys + pos,
+			    GGML_DDR_BASE_ADDR + pos,
+			    DMA_MEM_TO_DEV);
 	} else if (priv->mode_dma_test) {
-		if (copy_from_user(priv->dma_buf_virt, buf, count)) {
+		if (copy_from_user(priv->dma_buf_virt + priv->dconfig.offset, buf, count)) {
 			dev_err(&priv->pdev->dev, "failed to copy_from_user in write\n");
 			return -EFAULT;
 		}
@@ -797,7 +794,6 @@ fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			priv->vx_data_size, priv->vy_data_size);
 
 		fpga_dump_regs(priv);
-
 		fpga_do_ggml_init(priv);
 		fpga_dump_regs(priv);
                 break;
@@ -826,6 +822,7 @@ static const struct file_operations fpga_fops = {
 	.read		= fpga_read,
 	.write		= fpga_write,
 	.unlocked_ioctl	= fpga_ioctl,
+	.llseek		= default_llseek,
 };
 
 static int
