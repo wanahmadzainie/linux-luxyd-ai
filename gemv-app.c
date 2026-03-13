@@ -463,10 +463,8 @@ static int app_read_and_process_output(int fd, gemv_config const *params,
 		return 1;
 	}
 
-	for (int i = 0; i < nc_output; ++i) {
-		int fixed_point_val = (int)(*raw_output_ptr)[i]; // Cast u32 to int (signed)
-		(*calculated_output_ptr)[i] = (float)fixed_point_val / 100.0f; // Scale back
-	}
+	for (int i = 0; i < nc_output; i++)
+		(*calculated_output_ptr)[i] = *(float *)&((*raw_output_ptr)[i]);
 
 	return 0;
 }
