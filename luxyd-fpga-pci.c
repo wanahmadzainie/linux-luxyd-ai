@@ -16,7 +16,7 @@
 
 #include "luxyd-ioctl.h"
 
-#define DEVICE_NAME	"luxyd_fpga"
+#define DEVICE_NAME	"fpga0"
 #define DRIVER_NAME	"luxyd-fpga-pci"
 #define DRIVER_VERSION	"0.2"
 
