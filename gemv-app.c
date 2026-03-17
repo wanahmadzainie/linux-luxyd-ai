@@ -12,7 +12,7 @@
 
 #include "luxyd-ioctl.h"
 
-#define DEVICE_PATH	"/dev/luxyd_fpga"
+#define DEVICE_PATH	"/dev/fpga0"
 
 #define GGML_LUT_SIZE	(64 * 1024 * 1024)
 #define GGML_S_SIZE	(64 * 1024 * 1024)
