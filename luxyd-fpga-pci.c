@@ -197,7 +197,7 @@ static inline u32 fpga_read32(struct fpga_device *priv, u32 offset)
 	u32 val;
 
 	val = ioread32(priv->bar0_virt_addr + offset);
-	pr_info("READ_REG(0x%08x)  = 0x%08x\n", offset, val);
+	pr_debug("READ_REG(0x%08x)  = 0x%08x\n", offset, val);
 
 	return val;
 }
@@ -205,7 +205,7 @@ static inline u32 fpga_read32(struct fpga_device *priv, u32 offset)
 static inline void fpga_write32(struct fpga_device *priv, u32 offset, u32 val)
 {
 	iowrite32(val, priv->bar0_virt_addr + offset);
-	pr_info("WRITE_REG(0x%08x) = 0x%08x\n", offset, val);
+	pr_debug("WRITE_REG(0x%08x) = 0x%08x\n", offset, val);
 }
 
 static inline int fpga_ready(struct fpga_device *priv)
@@ -218,7 +218,7 @@ static inline int fpga_do_ggml_init(struct fpga_device *priv)
 	int timeout;
 	u32 val;
 
-	pr_info("ggml init start\n");
+	pr_debug("ggml init start\n");
 
 	/* set ggml_init lut address 31-0 */
 	fpga_write32(priv, PCIE_GGML_INIT_LUT_LOW, lower_32_bits(0x80000000));
@@ -227,9 +227,9 @@ static inline int fpga_do_ggml_init(struct fpga_device *priv)
 	fpga_write32(priv, PCIE_GGML_INIT_LUT_HIGH, upper_32_bits(0x0));
 
 	if (fpga_ready(priv))
-		pr_info("FPGA ready to accept command\n");
+		pr_debug("FPGA ready to accept command\n");
 	else
-		pr_info("FPGA not ready to accept command\n");
+		pr_err("FPGA not ready to accept command\n");
 
 	/* set ggml_init start */
 	val = CMD_GGML_INIT | CMD_SIGNATURE;
@@ -238,7 +238,6 @@ static inline int fpga_do_ggml_init(struct fpga_device *priv)
 
 	/* get ggml_init ready */
 	val = STS_GGML_INIT | STS_FPGA_READY;
-	pr_info("ggml init reading status\n");
 	for (timeout = 100; timeout > 0; timeout--) {
 		if ((fpga_read32(priv, PCIE_GGML_STATUS) & val) == val)
 			break;
@@ -246,7 +245,7 @@ static inline int fpga_do_ggml_init(struct fpga_device *priv)
 	}
 
 	if (timeout == 0) {
-		pr_info("ggml init not complete\n");
+		pr_err("ggml init not complete\n");
 		return -EBUSY;
 	}
 
@@ -291,7 +290,7 @@ static inline int fpga_do_ggml_init(struct fpga_device *priv)
 	/* set ggml_proc nc */
 	fpga_write32(priv, PCIE_GGML_NC, priv->gconfig.nc);
 
-	pr_info("ggml init end\n");
+	pr_debug("ggml init end\n");
 	return 0;
 }
 
@@ -300,7 +299,7 @@ static inline int fpga_do_ggml_proc(struct fpga_device *priv)
 	int timeout;
 	int val;
 
-	pr_info("ggml proc start\n");
+	pr_debug("ggml proc start\n");
 
 	/* set ggml_proc start */
 	val = CMD_GGML_PROC | CMD_SIGNATURE;
@@ -309,7 +308,6 @@ static inline int fpga_do_ggml_proc(struct fpga_device *priv)
 
 	/* get ggml_proc done */
 	val = STS_GGML_PROC | STS_FPGA_READY;
-	pr_info("ggml proc reading status\n");
 	for (timeout = 1000; timeout > 0; timeout--) {
                 if ((fpga_read32(priv, PCIE_GGML_STATUS) & val) == val)
                         break;
@@ -317,12 +315,12 @@ static inline int fpga_do_ggml_proc(struct fpga_device *priv)
         }
 
         if (timeout == 0) {
-                pr_info("ggml proc not complete\n");
+                pr_err("ggml proc not complete\n");
                 return -EBUSY;
         }
 
 	pr_info("ggml proc done\n");
-	pr_info("ggml proc end\n");
+	pr_debug("ggml proc end\n");
 	return 0;
 }
 
@@ -346,7 +344,7 @@ do_matrix_multiplication(u8 *a, u8 *b, u32 *c, size_t m, size_t n, size_t p)
 static __maybe_unused void
 fpga_dump_regs(struct fpga_device *priv)
 {
-	pr_info("ggml registers dump start\n");
+	pr_debug("ggml registers dump start\n");
 
 	fpga_read32(priv, PCIE_GGML_CTRL);
 	fpga_read32(priv, PCIE_GGML_STATUS);
@@ -366,7 +364,7 @@ fpga_dump_regs(struct fpga_device *priv)
 	fpga_read32(priv, PCIE_GGML_NR);
 	fpga_read32(priv, PCIE_GGML_NC);
 
-	pr_info("ggml registers dump end\n");
+	pr_debug("ggml registers dump end\n");
 }
 
 static __maybe_unused int
@@ -388,36 +386,36 @@ fpga_do_dma(struct fpga_device *priv, size_t len, u64 src_addr, u64 dst_addr,
 
 	if (dir == DMA_MEM_TO_DEV) {		/* H2C */
 		val = ioread32(priv->bar1_virt_addr);
-		pr_info("H2C DMA Engine ID (0x%08x)\n", val);
+		pr_debug("H2C DMA Engine ID (0x%08x)\n", val);
 
-		pr_info("DMA descriptor address   0x%p\n", dma_desc);
-		pr_info("DMA descriptor: control =0x%08x\n", dma_desc->control);
-		pr_info("DMA descriptor: bytes   =0x%08x\n", dma_desc->bytes);
-		pr_info("DMA descriptor: src_addr=0x%016llx\n", dma_desc->src_addr);
-		pr_info("DMA descriptor: dst_addr=0x%016llx\n", dma_desc->dst_addr);
+		pr_debug("DMA descriptor address   0x%p\n", dma_desc);
+		pr_debug("DMA descriptor: control =0x%08x\n", dma_desc->control);
+		pr_debug("DMA descriptor: bytes   =0x%08x\n", dma_desc->bytes);
+		pr_debug("DMA descriptor: src_addr=0x%016llx\n", dma_desc->src_addr);
+		pr_debug("DMA descriptor: dst_addr=0x%016llx\n", dma_desc->dst_addr);
 
 		/* write first XDMA descriptor */
 		val = lower_32_bits(priv->dma_desc_phys);
 		iowrite32(val, priv->bar1_virt_addr + 0x4080);
-		pr_info("H2C: REG_WRITE(0x4080) 0x%08x\n", val);
+		pr_debug("H2C: REG_WRITE(0x4080) 0x%08x\n", val);
 		val = upper_32_bits(priv->dma_desc_phys);
 		iowrite32(val, priv->bar1_virt_addr + 0x4084);
-		pr_info("H2C: REG_WRITE(0x4084) 0x%08x\n", val);
+		pr_debug("H2C: REG_WRITE(0x4084) 0x%08x\n", val);
 
 		/* kick off H2C DMA transfer */
 		iowrite32(0x00fffe7f, priv->bar1_virt_addr + 0x0004);
 		val = ioread32(priv->bar1_virt_addr + 0x0004);
-		pr_info("H2C: REG_WRITE(0x0004) 0x%08x\n", val);
-		pr_info("H2C: kick off DMA transfer\n");
+		pr_debug("H2C: REG_WRITE(0x0004) 0x%08x\n", val);
+		pr_debug("H2C: kick off DMA transfer\n");
 
 		/* poll H2C status */
-		for (timeout = 1000; timeout > 0; timeout--) {
+		for (timeout = 10000; timeout > 0; timeout--) {
 			val = ioread32(priv->bar1_virt_addr + 0x0040);
-			pr_info("H2C: REG_READ(0x0040) 0x%08x\n", val);
+			pr_debug("H2C: REG_READ(0x0040) 0x%08x\n", val);
 			if ((val & BIT(0)) == 0x0)
 				break;
 
-			udelay(100);
+			udelay(10);
 		}
 
 		if (timeout == 0)
@@ -425,57 +423,57 @@ fpga_do_dma(struct fpga_device *priv, size_t len, u64 src_addr, u64 dst_addr,
 
 		/* read H2C descriptor count */
 		val = ioread32(priv->bar1_virt_addr + 0x0048);
-		pr_info("H2C: REG_READ(0x0048) 0x%08x\n", val);
+		pr_debug("H2C: REG_READ(0x0048) 0x%08x\n", val);
 		if (!val)
 			pr_err("H2C: no XDMA descriptor found\n");
 		else
-			pr_info("H2C: XDMA descriptor found (%d)\n", val);
+			pr_debug("H2C: XDMA descriptor found (%d)\n", val);
 
 		/* read H2C status */
 		val = ioread32(priv->bar1_virt_addr + 0x0040);
-		pr_info("H2C: REG_READ(0x0040) 0x%08x\n", val);
+		pr_debug("H2C: REG_READ(0x0040) 0x%08x\n", val);
 		if (val == 0x6)
-			pr_info("H2C: DMA transfer completed\n");
+			pr_debug("H2C: DMA transfer completed\n");
 		else
 			pr_err("H2C: DMA transfer failed\n");
 
 		/* stop DMA transfer */
 		iowrite32(0x0, priv->bar1_virt_addr + 0x0004);
 		val = ioread32(priv->bar1_virt_addr + 0x0004);
-		pr_info("H2C: REG_WRITE(0x0004) 0x%08x\n", val);
-		pr_info("H2C: DMA transfer stopped\n");
+		pr_debug("H2C: REG_WRITE(0x0004) 0x%08x\n", val);
+		pr_debug("H2C: DMA transfer stopped\n");
 	} else if (dir == DMA_DEV_TO_MEM) {	/* C2H */
 		val = ioread32(priv->bar1_virt_addr + 0x1000);
-                pr_info("C2H DMA Engine ID (0x%08x)\n", val);
+                pr_debug("C2H DMA Engine ID (0x%08x)\n", val);
 
-		pr_info("DMA descriptor address   0x%p\n", dma_desc);
-		pr_info("DMA descriptor: control =0x%08x\n", dma_desc->control);
-		pr_info("DMA descriptor: bytes   =0x%08x\n", dma_desc->bytes);
-		pr_info("DMA descriptor: src_addr=0x%016llx\n", dma_desc->src_addr);
-		pr_info("DMA descriptor: dst_addr=0x%016llx\n", dma_desc->dst_addr);
+		pr_debug("DMA descriptor address   0x%p\n", dma_desc);
+		pr_debug("DMA descriptor: control =0x%08x\n", dma_desc->control);
+		pr_debug("DMA descriptor: bytes   =0x%08x\n", dma_desc->bytes);
+		pr_debug("DMA descriptor: src_addr=0x%016llx\n", dma_desc->src_addr);
+		pr_debug("DMA descriptor: dst_addr=0x%016llx\n", dma_desc->dst_addr);
 
 		/* write first XDMA descriptor */
 		val = lower_32_bits(priv->dma_desc_phys);
 		iowrite32(val, priv->bar1_virt_addr + 0x5080);
-		pr_info("C2H: REG_WRITE(0x5080) 0x%08x\n", val);
+		pr_debug("C2H: REG_WRITE(0x5080) 0x%08x\n", val);
 		val = upper_32_bits(priv->dma_desc_phys);
 		iowrite32(val, priv->bar1_virt_addr + 0x5084);
-		pr_info("C2H: REG_WRITE(0x5084) 0x%08x\n", val);
+		pr_debug("C2H: REG_WRITE(0x5084) 0x%08x\n", val);
 
 		/* kick off C2H DMA transfer */
 		iowrite32(0x00fffe7f, priv->bar1_virt_addr + 0x1004);
 		val = ioread32(priv->bar1_virt_addr + 0x1004);
-		pr_info("C2H: REG_WRITE(0x1004) 0x%08x\n", val);
-		pr_info("C2H: kick off DMA transfer\n");
+		pr_debug("C2H: REG_WRITE(0x1004) 0x%08x\n", val);
+		pr_debug("C2H: kick off DMA transfer\n");
 
 		/* poll C2H status */
-		for (timeout = 1000; timeout > 0; timeout--) {
+		for (timeout = 10000; timeout > 0; timeout--) {
 			val = ioread32(priv->bar1_virt_addr + 0x1040);
-			pr_info("C2H: REG_READ(0x1040) 0x%08x\n", val);
+			pr_debug("C2H: REG_READ(0x1040) 0x%08x\n", val);
 			if ((val & BIT(0)) == 0x0)
 				break;
 
-			udelay(100);
+			udelay(10);
 		}
 
 		if (timeout == 0)
@@ -483,25 +481,25 @@ fpga_do_dma(struct fpga_device *priv, size_t len, u64 src_addr, u64 dst_addr,
 
 		/* read C2H descriptor count */
 		val = ioread32(priv->bar1_virt_addr + 0x1048);
-		pr_info("C2H: REG_READ(0x1048) 0x%08x\n", val);
+		pr_debug("C2H: REG_READ(0x1048) 0x%08x\n", val);
 		if (!val)
 			pr_err("C2H: no XDMA descriptor found\n");
 		else
-			pr_info("C2H: DMA descriptor found (%d)\n", val);
+			pr_debug("C2H: DMA descriptor found (%d)\n", val);
 
 		/* read C2H status */
 		val = ioread32(priv->bar1_virt_addr + 0x1040);
-		pr_info("C2H: REG_READ(0x1040) 0x%08x\n", val);
+		pr_debug("C2H: REG_READ(0x1040) 0x%08x\n", val);
 		if (val == 0x6)
-			pr_info("C2H: DMA transfer completed\n");
+			pr_debug("C2H: DMA transfer completed\n");
 		else
 			pr_err("C2H: DMA transfer failed\n");
 
 		/* stop DMA transfer */
 		iowrite32(0x0, priv->bar1_virt_addr + 0x1004);
 		val = ioread32(priv->bar1_virt_addr + 0x1004);
-		pr_info("C2H: REG_WRITE(0x1004) 0x%08x\n", val);
-                pr_info("C2H: DMA transfer stopped\n");
+		pr_debug("C2H: REG_WRITE(0x1004) 0x%08x\n", val);
+                pr_debug("C2H: DMA transfer stopped\n");
 	} else {
 		pr_err("invalid direction\n");
 		return -EINVAL;
@@ -649,7 +647,7 @@ fpga_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 		}
 	}
 
-	pr_info("device read completed\n");
+	pr_debug("device read completed\n");
 	return count;
 }
 
@@ -735,7 +733,7 @@ fpga_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos
 			    DMA_MEM_TO_DEV);
 	}
 
-	pr_info("device write completed\n");
+	pr_debug("device write completed\n");
 	return count;
 }
 
@@ -787,13 +785,13 @@ fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			priv->vy_data_size = (size_t)nb * sizeof(block_q8_K_kernel);
 		}
 
-		pr_info("Parameters: n=%d bs=%zu nr=%d nc=%d\n",
-			priv->gconfig.n, priv->gconfig.bs, priv->gconfig.nr,
-			priv->gconfig.nc);
-		pr_info("vx_data_size=%zu bytes, vy_data_size=%zu bytes\n",
-			priv->vx_data_size, priv->vy_data_size);
+		pr_debug("Parameters: n=%d bs=%zu nr=%d nc=%d\n",
+			 priv->gconfig.n, priv->gconfig.bs, priv->gconfig.nr,
+			 priv->gconfig.nc);
+		pr_debug("vx_data_size=%zu bytes, vy_data_size=%zu bytes\n",
+			 priv->vx_data_size, priv->vy_data_size);
 
-		fpga_dump_regs(priv);
+		//fpga_dump_regs(priv);
 		fpga_do_ggml_init(priv);
 		fpga_dump_regs(priv);
                 break;
@@ -811,7 +809,7 @@ fpga_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return -EINVAL;
 	}
 
-	pr_info("device ioctl completed\n");
+	pr_debug("device ioctl completed\n");
 	return ret;
 }
 
